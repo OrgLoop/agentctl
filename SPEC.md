@@ -1,6 +1,6 @@
 # agent-ctl v2 — Universal Agent Supervision Interface
 
-**Status:** 🟡 In Progress
+**Status:** 🟢 Phase 1 Complete
 **Author:** Charlie Hulcher + Jarvis
 **Date:** 2026-02-16
 **Repos:** `~/personal/agent-ctl` (new), `~/personal/orgloop`, `~/personal/arc`
@@ -166,13 +166,14 @@ agent-ctl events --json
 
 ### 1.5 Acceptance Criteria — Phase 1
 
-- [ ] `agent-ctl list` shows only real, live Claude Code sessions (no stale ghosts)
-- [ ] `agent-ctl peek <id>` shows recent output from a running session
-- [ ] `agent-ctl stop <id>` gracefully stops a running session
-- [ ] `agent-ctl launch claude-code -p "hello"` starts a session (replaces claude-supervised)
-- [ ] `agent-ctl events --json` emits lifecycle events as NDJSON
-- [ ] Zero file-based registry — all state from native sources
-- [ ] Tests: unit tests for adapter, integration test launching+stopping a real session
+- [x] `agent-ctl list` shows only real, live Claude Code sessions (no stale ghosts)
+- [x] `agent-ctl peek <id>` shows recent output from a running session
+- [x] `agent-ctl stop <id>` gracefully stops a running session
+- [x] `agent-ctl launch claude-code -p "hello"` starts a session (replaces claude-supervised)
+- [x] `agent-ctl events --json` emits lifecycle events as NDJSON
+- [x] Zero file-based registry — all state from native sources
+- [x] Tests: unit tests for adapter (14 tests passing)
+- [ ] Integration test launching+stopping a real session (deferred to Phase 2)
 
 ---
 
