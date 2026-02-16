@@ -1,0 +1,430 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ClaudeCodeAdapter } from "./claude-code.js";
+
+let tmpDir: string;
+let claudeDir: string;
+let projectsDir: string;
+let adapter: ClaudeCodeAdapter;
+
+beforeEach(async () => {
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-ctl-test-"));
+  claudeDir = path.join(tmpDir, ".claude");
+  projectsDir = path.join(claudeDir, "projects");
+  await fs.mkdir(projectsDir, { recursive: true });
+
+  // Inject empty PID map so real processes don't interfere with tests
+  adapter = new ClaudeCodeAdapter({
+    claudeDir,
+    getPids: async () => new Map(),
+  });
+});
+
+afterEach(async () => {
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+// --- Helper to create fake session data ---
+
+async function createFakeProject(
+  projectName: string,
+  sessions: Array<{
+    id: string;
+    firstPrompt: string;
+    created: string;
+    modified: string;
+    messages: Array<Record<string, unknown>>;
+    gitBranch?: string;
+  }>,
+) {
+  const projDir = path.join(projectsDir, projectName);
+  await fs.mkdir(projDir, { recursive: true });
+
+  const entries = sessions.map((s) => ({
+    sessionId: s.id,
+    fullPath: path.join(projDir, `${s.id}.jsonl`),
+    fileMtime: new Date(s.modified).getTime(),
+    firstPrompt: s.firstPrompt,
+    messageCount: s.messages.length,
+    created: s.created,
+    modified: s.modified,
+    gitBranch: s.gitBranch || "",
+    projectPath: `/Users/test/${projectName}`,
+    isSidechain: false,
+  }));
+
+  const index = {
+    version: 1,
+    entries,
+    originalPath: `/Users/test/${projectName}`,
+  };
+
+  await fs.writeFile(
+    path.join(projDir, "sessions-index.json"),
+    JSON.stringify(index),
+  );
+
+  for (const s of sessions) {
+    const jsonl = s.messages.map((m) => JSON.stringify(m)).join("\n");
+    await fs.writeFile(path.join(projDir, `${s.id}.jsonl`), jsonl);
+  }
+}
+
+// --- Tests ---
+
+describe("ClaudeCodeAdapter", () => {
+  it("has correct id", () => {
+    expect(adapter.id).toBe("claude-code");
+  });
+
+  describe("list()", () => {
+    it("returns empty array when no projects exist", async () => {
+      const sessions = await adapter.list({ all: true });
+      expect(sessions).toEqual([]);
+    });
+
+    it("returns stopped sessions with --all", async () => {
+      const now = new Date();
+      const created = new Date(now.getTime() - 3600_000); // 1 hour ago
+
+      await createFakeProject("test-project", [
+        {
+          id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          firstPrompt: "Hello world",
+          created: created.toISOString(),
+          modified: now.toISOString(),
+          messages: [
+            {
+              type: "user",
+              sessionId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+              timestamp: created.toISOString(),
+              message: { role: "user", content: "Hello world" },
+            },
+            {
+              type: "assistant",
+              sessionId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+              timestamp: now.toISOString(),
+              message: {
+                role: "assistant",
+                model: "claude-opus-4-6",
+                content: [{ type: "text", text: "Hello! How can I help?" }],
+                usage: { input_tokens: 100, output_tokens: 50 },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const sessions = await adapter.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+      expect(sessions[0].status).toBe("stopped");
+      expect(sessions[0].model).toBe("claude-opus-4-6");
+      expect(sessions[0].adapter).toBe("claude-code");
+    });
+
+    it("filters by status", async () => {
+      const now = new Date();
+      await createFakeProject("test-project", [
+        {
+          id: "aaaaaaaa-0000-0000-0000-000000000001",
+          firstPrompt: "task one",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const running = await adapter.list({ status: "running" });
+      expect(running).toHaveLength(0);
+
+      const stopped = await adapter.list({ status: "stopped" });
+      expect(stopped).toHaveLength(1);
+    });
+
+    it("skips sidechain sessions", async () => {
+      const now = new Date();
+      const projDir = path.join(projectsDir, "sidechain-test");
+      await fs.mkdir(projDir, { recursive: true });
+
+      const index = {
+        version: 1,
+        entries: [
+          {
+            sessionId: "main-session-id",
+            fullPath: path.join(projDir, "main-session-id.jsonl"),
+            fileMtime: now.getTime(),
+            firstPrompt: "main",
+            messageCount: 1,
+            created: now.toISOString(),
+            modified: now.toISOString(),
+            projectPath: "/test",
+            isSidechain: false,
+          },
+          {
+            sessionId: "sidechain-session-id",
+            fullPath: path.join(projDir, "sidechain-session-id.jsonl"),
+            fileMtime: now.getTime(),
+            firstPrompt: "sidechain",
+            messageCount: 1,
+            created: now.toISOString(),
+            modified: now.toISOString(),
+            projectPath: "/test",
+            isSidechain: true,
+          },
+        ],
+        originalPath: "/test",
+      };
+
+      await fs.writeFile(
+        path.join(projDir, "sessions-index.json"),
+        JSON.stringify(index),
+      );
+      await fs.writeFile(path.join(projDir, "main-session-id.jsonl"), "");
+      await fs.writeFile(path.join(projDir, "sidechain-session-id.jsonl"), "");
+
+      const sessions = await adapter.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("main-session-id");
+    });
+
+    it("default list (no opts) only shows running sessions", async () => {
+      const now = new Date();
+      await createFakeProject("default-test", [
+        {
+          id: "default-session-0000-000000000000",
+          firstPrompt: "test",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // No running PIDs, so default list should be empty
+      const sessions = await adapter.list();
+      expect(sessions).toHaveLength(0);
+    });
+  });
+
+  describe("peek()", () => {
+    it("returns recent assistant messages", async () => {
+      const now = new Date();
+      await createFakeProject("peek-test", [
+        {
+          id: "peek-session-id-0000-000000000000",
+          firstPrompt: "test prompt",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [
+            {
+              type: "user",
+              sessionId: "peek-session-id-0000-000000000000",
+              message: { role: "user", content: "What is 2+2?" },
+            },
+            {
+              type: "assistant",
+              sessionId: "peek-session-id-0000-000000000000",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "2+2 equals 4." }],
+                model: "claude-opus-4-6",
+              },
+            },
+            {
+              type: "assistant",
+              sessionId: "peek-session-id-0000-000000000000",
+              message: {
+                role: "assistant",
+                content: "String content works too.",
+                model: "claude-opus-4-6",
+              },
+            },
+          ],
+        },
+      ]);
+
+      const output = await adapter.peek("peek-session-id-0000-000000000000");
+      expect(output).toContain("2+2 equals 4.");
+      expect(output).toContain("String content works too.");
+    });
+
+    it("respects line limit", async () => {
+      const now = new Date();
+      const messages = [];
+      for (let i = 0; i < 10; i++) {
+        messages.push({
+          type: "assistant",
+          sessionId: "limit-session-0000-000000000000",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: `Message ${i}` }],
+          },
+        });
+      }
+
+      await createFakeProject("limit-test", [
+        {
+          id: "limit-session-0000-000000000000",
+          firstPrompt: "test",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages,
+        },
+      ]);
+
+      const output = await adapter.peek("limit-session-0000-000000000000", {
+        lines: 3,
+      });
+      // Should contain last 3 messages
+      expect(output).toContain("Message 7");
+      expect(output).toContain("Message 8");
+      expect(output).toContain("Message 9");
+      expect(output).not.toContain("Message 6");
+    });
+
+    it("throws for unknown session", async () => {
+      await expect(adapter.peek("nonexistent")).rejects.toThrow(
+        "Session not found",
+      );
+    });
+
+    it("supports prefix matching", async () => {
+      const now = new Date();
+      await createFakeProject("prefix-test", [
+        {
+          id: "abcdef12-3456-7890-abcd-ef1234567890",
+          firstPrompt: "prefix test",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [
+            {
+              type: "assistant",
+              sessionId: "abcdef12-3456-7890-abcd-ef1234567890",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "Found by prefix!" }],
+              },
+            },
+          ],
+        },
+      ]);
+
+      const output = await adapter.peek("abcdef12");
+      expect(output).toContain("Found by prefix!");
+    });
+  });
+
+  describe("status()", () => {
+    it("returns session details", async () => {
+      const now = new Date();
+      await createFakeProject("status-test", [
+        {
+          id: "status-session-0000-000000000000",
+          firstPrompt: "status check",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          gitBranch: "main",
+          messages: [
+            {
+              type: "assistant",
+              sessionId: "status-session-0000-000000000000",
+              message: {
+                role: "assistant",
+                model: "claude-sonnet-4-5-20250929",
+                content: [{ type: "text", text: "Done." }],
+                usage: { input_tokens: 500, output_tokens: 200 },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const session = await adapter.status("status-session-0000-000000000000");
+      expect(session.id).toBe("status-session-0000-000000000000");
+      expect(session.adapter).toBe("claude-code");
+      expect(session.status).toBe("stopped");
+      expect(session.model).toBe("claude-sonnet-4-5-20250929");
+      expect(session.tokens).toEqual({ in: 500, out: 200 });
+      expect(session.meta.gitBranch).toBe("main");
+    });
+
+    it("throws for unknown session", async () => {
+      await expect(adapter.status("nonexistent")).rejects.toThrow(
+        "Session not found",
+      );
+    });
+  });
+
+  describe("token aggregation", () => {
+    it("sums tokens across multiple assistant messages", async () => {
+      const now = new Date();
+      await createFakeProject("token-test", [
+        {
+          id: "token-session-0000-000000000000",
+          firstPrompt: "tokens",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [
+            {
+              type: "assistant",
+              sessionId: "token-session-0000-000000000000",
+              message: {
+                role: "assistant",
+                model: "claude-opus-4-6",
+                content: [{ type: "text", text: "First" }],
+                usage: { input_tokens: 100, output_tokens: 50 },
+              },
+            },
+            {
+              type: "assistant",
+              sessionId: "token-session-0000-000000000000",
+              message: {
+                role: "assistant",
+                model: "claude-opus-4-6",
+                content: [{ type: "text", text: "Second" }],
+                usage: { input_tokens: 200, output_tokens: 100 },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const session = await adapter.status("token-session-0000-000000000000");
+      expect(session.tokens).toEqual({ in: 300, out: 150 });
+    });
+  });
+
+  describe("multiple projects", () => {
+    it("returns sessions from all projects", async () => {
+      const now = new Date();
+
+      await createFakeProject("project-a", [
+        {
+          id: "session-a-0000-0000-000000000000",
+          firstPrompt: "project a",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      await createFakeProject("project-b", [
+        {
+          id: "session-b-0000-0000-000000000000",
+          firstPrompt: "project b",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const sessions = await adapter.list({ all: true });
+      expect(sessions).toHaveLength(2);
+      const ids = sessions.map((s) => s.id);
+      expect(ids).toContain("session-a-0000-0000-000000000000");
+      expect(ids).toContain("session-b-0000-0000-000000000000");
+    });
+  });
+});
