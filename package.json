@@ -1,0 +1,16 @@
+{
+  "name": "agent-ctl",
+  "version": "0.1.0",
+  "description": "Universal agent supervision interface",
+  "type": "module",
+  "bin": { "agent-ctl": "./dist/cli.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "author": "Charlie Hulcher <charlie.hulcher@gmail.com>",
+  "license": "MIT",
+  "private": true
+}
