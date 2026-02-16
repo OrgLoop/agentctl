@@ -2,10 +2,12 @@
 
 import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
+import { OpenClawAdapter } from "./adapters/openclaw.js";
 import type { AgentAdapter, AgentSession, ListOpts } from "./core/types.js";
 
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
+  openclaw: new OpenClawAdapter(),
 };
 
 function getAdapter(name?: string): AgentAdapter {
