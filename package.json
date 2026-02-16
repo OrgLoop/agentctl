@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "Universal agent supervision interface",
   "type": "module",
-  "bin": { "agent-ctl": "./dist/cli.js" },
+  "bin": {
+    "agent-ctl": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
@@ -12,5 +14,12 @@
   },
   "author": "Charlie Hulcher <charlie.hulcher@gmail.com>",
   "license": "MIT",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@types/node": "^25.2.3",
+    "commander": "^14.0.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
 }
