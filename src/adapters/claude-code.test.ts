@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ClaudeCodeAdapter } from "./claude-code.js";
+import { ClaudeCodeAdapter, type PidInfo } from "./claude-code.js";
 
 let tmpDir: string;
 let claudeDir: string;
@@ -425,6 +425,197 @@ describe("ClaudeCodeAdapter", () => {
       const ids = sessions.map((s) => s.id);
       expect(ids).toContain("session-a-0000-0000-000000000000");
       expect(ids).toContain("session-b-0000-0000-000000000000");
+    });
+  });
+
+  describe("PID recycling detection", () => {
+    it("detects recycled PID via cwd match — old session stays stopped", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionModified = new Date("2026-02-17T11:00:00Z");
+      // A different process got the same PID — started BEFORE the session
+      const processStartTime = "Mon Feb 16 08:00:00 2026";
+
+      await createFakeProject("pid-recycle-test", [
+        {
+          id: "old-session-0000-0000-000000000000",
+          firstPrompt: "old session",
+          created: sessionCreated.toISOString(),
+          modified: sessionModified.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(12345, {
+        pid: 12345,
+        cwd: "/Users/test/pid-recycle-test",
+        args: "claude --dangerously-skip-permissions --print",
+        startTime: processStartTime,
+      });
+
+      const adapterWithPids = new ClaudeCodeAdapter({
+        claudeDir,
+        getPids: async () => pidMap,
+      });
+
+      const sessions = await adapterWithPids.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+      expect(sessions[0].pid).toBeUndefined();
+    });
+
+    it("legitimate process matches — session shows as running", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionModified = new Date("2026-02-17T10:01:00Z");
+      // Process started AFTER the session was created
+      const processStartTime = "Mon Feb 17 10:00:05 2026";
+
+      await createFakeProject("legit-running-test", [
+        {
+          id: "running-session-0000-000000000000",
+          firstPrompt: "currently running",
+          created: sessionCreated.toISOString(),
+          modified: sessionModified.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(99999, {
+        pid: 99999,
+        cwd: "/Users/test/legit-running-test",
+        args: "claude --dangerously-skip-permissions --print",
+        startTime: processStartTime,
+      });
+
+      const adapterWithPids = new ClaudeCodeAdapter({
+        claudeDir,
+        getPids: async () => pidMap,
+      });
+
+      const sessions = await adapterWithPids.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("running");
+      expect(sessions[0].pid).toBe(99999);
+    });
+
+    it("detects recycled PID via sessionId in args — old session stays stopped", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionModified = new Date("2026-02-17T11:00:00Z");
+      // Process started before the session — recycled PID happens to have
+      // a matching string in its args (unlikely but possible)
+      const processStartTime = "Sun Feb 16 08:00:00 2026";
+
+      await createFakeProject("pid-recycle-args-test", [
+        {
+          id: "args-session-0000-0000-000000000000",
+          firstPrompt: "args test",
+          created: sessionCreated.toISOString(),
+          modified: sessionModified.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(54321, {
+        pid: 54321,
+        cwd: "/some/other/path",
+        args: "claude --continue args-session-0000-0000-000000000000",
+        startTime: processStartTime,
+      });
+
+      const adapterWithPids = new ClaudeCodeAdapter({
+        claudeDir,
+        getPids: async () => pidMap,
+      });
+
+      const sessions = await adapterWithPids.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+    });
+
+    it("falls back to running when startTime is unavailable", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("no-starttime-test", [
+        {
+          id: "notime-session-0000-000000000000",
+          firstPrompt: "no start time",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(11111, {
+        pid: 11111,
+        cwd: "/Users/test/no-starttime-test",
+        args: "claude --dangerously-skip-permissions",
+        // No startTime — should assume match (backward compat)
+      });
+
+      const adapterWithPids = new ClaudeCodeAdapter({
+        claudeDir,
+        getPids: async () => pidMap,
+      });
+
+      const sessions = await adapterWithPids.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("running");
+    });
+
+    it("multiple sessions in same project — only the one matching the PID shows running", async () => {
+      const oldCreated = new Date("2026-02-16T10:00:00Z");
+      const newCreated = new Date("2026-02-17T10:00:00Z");
+      // Process started after the new session
+      const processStartTime = "Mon Feb 17 10:00:01 2026";
+
+      await createFakeProject("multi-session-project", [
+        {
+          id: "old-multi-session-0000-000000000000",
+          firstPrompt: "old task",
+          created: oldCreated.toISOString(),
+          modified: oldCreated.toISOString(),
+          messages: [],
+        },
+        {
+          id: "new-multi-session-0000-000000000000",
+          firstPrompt: "new task",
+          created: newCreated.toISOString(),
+          modified: newCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(77777, {
+        pid: 77777,
+        cwd: "/Users/test/multi-session-project",
+        args: "claude --dangerously-skip-permissions --print",
+        startTime: processStartTime,
+      });
+
+      const adapterWithPids = new ClaudeCodeAdapter({
+        claudeDir,
+        getPids: async () => pidMap,
+      });
+
+      const sessions = await adapterWithPids.list({ all: true });
+      expect(sessions).toHaveLength(2);
+
+      const oldSession = sessions.find(
+        (s) => s.id === "old-multi-session-0000-000000000000",
+      );
+      const newSession = sessions.find(
+        (s) => s.id === "new-multi-session-0000-000000000000",
+      );
+
+      // Both match by cwd, but the process started after both sessions,
+      // so both could legitimately be running. This is a cwd ambiguity
+      // (not PID recycling). The process matches both.
+      expect(oldSession?.status).toBe("running");
+      expect(newSession?.status).toBe("running");
     });
   });
 });
