@@ -2,23 +2,32 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ClaudeCodeAdapter, type PidInfo } from "./claude-code.js";
+import {
+  ClaudeCodeAdapter,
+  type LaunchedSessionMeta,
+  type PidInfo,
+} from "./claude-code.js";
 
 let tmpDir: string;
 let claudeDir: string;
 let projectsDir: string;
+let sessionsMetaDir: string;
 let adapter: ClaudeCodeAdapter;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-ctl-test-"));
   claudeDir = path.join(tmpDir, ".claude");
   projectsDir = path.join(claudeDir, "projects");
+  sessionsMetaDir = path.join(claudeDir, "agent-ctl", "sessions");
   await fs.mkdir(projectsDir, { recursive: true });
+  await fs.mkdir(sessionsMetaDir, { recursive: true });
 
-  // Inject empty PID map so real processes don't interfere with tests
+  // Inject empty PID map and dead-process checker so real processes don't interfere
   adapter = new ClaudeCodeAdapter({
     claudeDir,
+    sessionsMetaDir,
     getPids: async () => new Map(),
+    isProcessAlive: () => false,
   });
 });
 
@@ -455,7 +464,9 @@ describe("ClaudeCodeAdapter", () => {
 
       const adapterWithPids = new ClaudeCodeAdapter({
         claudeDir,
+        sessionsMetaDir,
         getPids: async () => pidMap,
+        isProcessAlive: () => false,
       });
 
       const sessions = await adapterWithPids.list({ all: true });
@@ -490,7 +501,9 @@ describe("ClaudeCodeAdapter", () => {
 
       const adapterWithPids = new ClaudeCodeAdapter({
         claudeDir,
+        sessionsMetaDir,
         getPids: async () => pidMap,
+        isProcessAlive: () => false,
       });
 
       const sessions = await adapterWithPids.list({ all: true });
@@ -526,7 +539,9 @@ describe("ClaudeCodeAdapter", () => {
 
       const adapterWithPids = new ClaudeCodeAdapter({
         claudeDir,
+        sessionsMetaDir,
         getPids: async () => pidMap,
+        isProcessAlive: () => false,
       });
 
       const sessions = await adapterWithPids.list({ all: true });
@@ -534,7 +549,7 @@ describe("ClaudeCodeAdapter", () => {
       expect(sessions[0].status).toBe("stopped");
     });
 
-    it("falls back to running when startTime is unavailable", async () => {
+    it("falls back to stopped when startTime is unavailable (BUG-1 safety)", async () => {
       const sessionCreated = new Date("2026-02-17T10:00:00Z");
 
       await createFakeProject("no-starttime-test", [
@@ -552,17 +567,19 @@ describe("ClaudeCodeAdapter", () => {
         pid: 11111,
         cwd: "/Users/test/no-starttime-test",
         args: "claude --dangerously-skip-permissions",
-        // No startTime — should assume match (backward compat)
+        // No startTime — can't verify PID ownership, assume stopped (safety)
       });
 
       const adapterWithPids = new ClaudeCodeAdapter({
         claudeDir,
+        sessionsMetaDir,
         getPids: async () => pidMap,
+        isProcessAlive: () => false,
       });
 
       const sessions = await adapterWithPids.list({ all: true });
       expect(sessions).toHaveLength(1);
-      expect(sessions[0].status).toBe("running");
+      expect(sessions[0].status).toBe("stopped");
     });
 
     it("multiple sessions in same project — only the one matching the PID shows running", async () => {
@@ -598,7 +615,9 @@ describe("ClaudeCodeAdapter", () => {
 
       const adapterWithPids = new ClaudeCodeAdapter({
         claudeDir,
+        sessionsMetaDir,
         getPids: async () => pidMap,
+        isProcessAlive: () => false,
       });
 
       const sessions = await adapterWithPids.list({ all: true });
@@ -616,6 +635,204 @@ describe("ClaudeCodeAdapter", () => {
       // (not PID recycling). The process matches both.
       expect(oldSession?.status).toBe("running");
       expect(newSession?.status).toBe("running");
+    });
+  });
+
+  describe("session lifecycle — detached processes (BUG-2, BUG-3)", () => {
+    it("session shows running when persisted metadata has live PID", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const launchedAt = sessionCreated.toISOString();
+
+      await createFakeProject("detached-test", [
+        {
+          id: "detached-session-0000-000000000000",
+          firstPrompt: "detached test",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Write persisted session metadata (as launch() would)
+      const meta: LaunchedSessionMeta = {
+        sessionId: "detached-session-0000-000000000000",
+        pid: 55555,
+        startTime: "Mon Feb 17 10:00:01 2026",
+        cwd: "/Users/test/detached-test",
+        launchedAt,
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "detached-session-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      // No PIDs from ps aux (wrapper exited), but PID is still alive
+      const adapterWithLivePid = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: (pid) => pid === 55555,
+      });
+
+      const sessions = await adapterWithLivePid.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("running");
+      expect(sessions[0].pid).toBe(55555);
+    });
+
+    it("session shows stopped when persisted PID is dead", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("dead-detached-test", [
+        {
+          id: "dead-detached-0000-0000-000000000000",
+          firstPrompt: "dead detached",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Write stale metadata — PID is dead
+      const meta: LaunchedSessionMeta = {
+        sessionId: "dead-detached-0000-0000-000000000000",
+        pid: 66666,
+        startTime: "Mon Feb 17 10:00:01 2026",
+        cwd: "/Users/test/dead-detached-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "dead-detached-0000-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      const adapterWithDeadPid = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await adapterWithDeadPid.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+      expect(sessions[0].pid).toBeUndefined();
+    });
+
+    it("cleans up stale metadata when PID is dead", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("cleanup-test", [
+        {
+          id: "cleanup-session-0000-000000000000",
+          firstPrompt: "cleanup test",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const metaPath = path.join(
+        sessionsMetaDir,
+        "cleanup-session-0000-000000000000.json",
+      );
+      const meta: LaunchedSessionMeta = {
+        sessionId: "cleanup-session-0000-000000000000",
+        pid: 77777,
+        startTime: "Mon Feb 17 10:00:01 2026",
+        cwd: "/Users/test/cleanup-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(metaPath, JSON.stringify(meta));
+
+      const adapterWithDeadPid = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      await adapterWithDeadPid.list({ all: true });
+
+      // Metadata file should have been cleaned up
+      await expect(fs.access(metaPath)).rejects.toThrow();
+    });
+
+    it("detects PID recycling in persisted metadata via start time", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("meta-recycle-test", [
+        {
+          id: "meta-recycle-0000-0000-000000000000",
+          firstPrompt: "meta recycle test",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Metadata says PID 88888 started before the session — recycled
+      const meta: LaunchedSessionMeta = {
+        sessionId: "meta-recycle-0000-0000-000000000000",
+        pid: 88888,
+        startTime: "Sun Feb 16 08:00:00 2026",
+        cwd: "/Users/test/meta-recycle-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "meta-recycle-0000-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      const adapterWithRecycledPid = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: (pid) => pid === 88888, // PID exists but is recycled
+      });
+
+      const sessions = await adapterWithRecycledPid.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+    });
+
+    it("old metadata without startTime but with live PID assumes running", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("meta-no-starttime-test", [
+        {
+          id: "meta-notime-0000-0000-000000000000",
+          firstPrompt: "meta no starttime",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Metadata has no startTime (e.g. ps failed during launch)
+      const meta: LaunchedSessionMeta = {
+        sessionId: "meta-notime-0000-0000-000000000000",
+        pid: 99999,
+        cwd: "/Users/test/meta-no-starttime-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "meta-notime-0000-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      const adapterWithLivePid = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: (pid) => pid === 99999,
+      });
+
+      const sessions = await adapterWithLivePid.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      // With live PID but no startTime, we still assume running for detached sessions
+      expect(sessions[0].status).toBe("running");
+      expect(sessions[0].pid).toBe(99999);
     });
   });
 });
