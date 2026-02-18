@@ -84,7 +84,8 @@ export class OpenClawAdapter implements AgentAdapter {
 
   constructor(opts?: OpenClawAdapterOpts) {
     this.baseUrl = opts?.baseUrl || DEFAULT_BASE_URL;
-    this.authToken = opts?.authToken || process.env.OPENCLAW_WEBHOOK_TOKEN || "";
+    this.authToken =
+      opts?.authToken || process.env.OPENCLAW_WEBHOOK_TOKEN || "";
     this.rpcCall = opts?.rpcCall || this.defaultRpcCall.bind(this);
   }
 
@@ -130,7 +131,9 @@ export class OpenClawAdapter implements AgentAdapter {
         maxChars: 4000,
       })) as SessionsPreviewResult;
     } catch (err) {
-      throw new Error(`Failed to peek session ${sessionId}: ${(err as Error).message}`);
+      throw new Error(
+        `Failed to peek session ${sessionId}: ${(err as Error).message}`,
+      );
     }
 
     const preview = result.previews?.[0];
@@ -157,12 +160,17 @@ export class OpenClawAdapter implements AgentAdapter {
         search: sessionId,
       })) as SessionsListResult;
     } catch (err) {
-      throw new Error(`Failed to get status for ${sessionId}: ${(err as Error).message}`);
+      throw new Error(
+        `Failed to get status for ${sessionId}: ${(err as Error).message}`,
+      );
     }
 
     const row = result.sessions.find(
-      (s) => s.sessionId === sessionId || s.key === sessionId ||
-        s.sessionId?.startsWith(sessionId) || s.key.startsWith(sessionId),
+      (s) =>
+        s.sessionId === sessionId ||
+        s.key === sessionId ||
+        s.sessionId?.startsWith(sessionId) ||
+        s.key.startsWith(sessionId),
     );
 
     if (!row) throw new Error(`Session not found: ${sessionId}`);
@@ -296,8 +304,11 @@ export class OpenClawAdapter implements AgentAdapter {
     }
 
     const row = result.sessions.find(
-      (s) => s.sessionId === sessionId || s.key === sessionId ||
-        s.sessionId?.startsWith(sessionId) || s.key.startsWith(sessionId),
+      (s) =>
+        s.sessionId === sessionId ||
+        s.key === sessionId ||
+        s.sessionId?.startsWith(sessionId) ||
+        s.key.startsWith(sessionId),
     );
 
     return row?.key ?? null;
@@ -335,7 +346,8 @@ export class OpenClawAdapter implements AgentAdapter {
 
       ws.onmessage = (event: { data: unknown }) => {
         try {
-          const raw = typeof event.data === "string" ? event.data : String(event.data);
+          const raw =
+            typeof event.data === "string" ? event.data : String(event.data);
           const frame = JSON.parse(raw);
 
           // Step 1: Receive challenge, send connect
@@ -384,11 +396,7 @@ export class OpenClawAdapter implements AgentAdapter {
             if (frame.ok) {
               resolve(frame.payload);
             } else {
-              reject(
-                new Error(
-                  frame.error?.message || `RPC error: ${method}`,
-                ),
-              );
+              reject(new Error(frame.error?.message || `RPC error: ${method}`));
             }
             return;
           }
@@ -398,9 +406,7 @@ export class OpenClawAdapter implements AgentAdapter {
             clearTimeout(timeout);
             ws.close();
             reject(
-              new Error(
-                frame.error?.message || "OpenClaw gateway auth failed",
-              ),
+              new Error(frame.error?.message || "OpenClaw gateway auth failed"),
             );
           }
         } catch {

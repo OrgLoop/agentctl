@@ -43,7 +43,7 @@ function formatSession(s: AgentSession): Record<string, string> {
 
 function shortenPath(p: string): string {
   const home = process.env.HOME || "";
-  if (p.startsWith(home)) return "~" + p.slice(home.length);
+  if (p.startsWith(home)) return `~${p.slice(home.length)}`;
   return p;
 }
 
@@ -76,7 +76,9 @@ function printTable(rows: Record<string, string>[]): void {
 
   // Rows
   for (const row of rows) {
-    const line = keys.map((k, i) => (row[k] || "").padEnd(widths[i])).join("  ");
+    const line = keys
+      .map((k, i) => (row[k] || "").padEnd(widths[i]))
+      .join("  ");
     console.log(line);
   }
 }
@@ -163,7 +165,9 @@ program
           console.log(`${k.padEnd(10)} ${v}`);
         }
         if (session.tokens) {
-          console.log(`Tokens     in: ${session.tokens.in}, out: ${session.tokens.out}`);
+          console.log(
+            `Tokens     in: ${session.tokens.in}, out: ${session.tokens.out}`,
+          );
         }
       }
     } catch (err) {
@@ -242,7 +246,9 @@ program
         cwd: opts.cwd,
         model: opts.model,
       });
-      console.log(`Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`);
+      console.log(
+        `Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`,
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
