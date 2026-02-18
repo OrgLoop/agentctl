@@ -25,6 +25,8 @@ export interface PidInfo {
   pid: number;
   cwd: string;
   args: string;
+  /** Process start time from `ps -p <pid> -o lstart=`, used to detect PID recycling */
+  startTime?: string;
 }
 
 export interface ClaudeCodeAdapterOpts {
@@ -180,8 +182,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   async status(sessionId: string): Promise<AgentSession> {
     const runningPids = await this.getPids();
     const entry = await this.findIndexEntry(sessionId);
-    if (!entry)
-      throw new Error(`Session not found: ${sessionId}`);
+    if (!entry) throw new Error(`Session not found: ${sessionId}`);
 
     return this.buildSessionFromIndex(entry.entry, entry.index, runningPids);
   }
@@ -305,7 +306,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
               session,
               timestamp: new Date(),
             };
-          } else if (prev.status === "running" && session.status === "stopped") {
+          } else if (
+            prev.status === "running" &&
+            session.status === "stopped"
+          ) {
             yield {
               type: "session.stopped",
               adapter: this.id,
@@ -313,10 +317,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
               session,
               timestamp: new Date(),
             };
-          } else if (
-            prev.status === "running" &&
-            session.status === "idle"
-          ) {
+          } else if (prev.status === "running" && session.status === "idle") {
             yield {
               type: "session.idle",
               adapter: this.id,
@@ -343,7 +344,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    */
   private async getEntriesForProject(
     projPath: string,
-    projDirName: string,
+    _projDirName: string,
   ): Promise<Array<{ entry: SessionIndexEntry; index: SessionIndex }>> {
     // Try index first
     const indexPath = path.join(projPath, "sessions-index.json");
@@ -358,7 +359,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // We'll determine originalPath from the JSONL content below
     let originalPath: string | undefined;
 
-    const results: Array<{ entry: SessionIndexEntry; index: SessionIndex }> = [];
+    const results: Array<{ entry: SessionIndexEntry; index: SessionIndex }> =
+      [];
 
     let files: string[];
     try {
@@ -372,7 +374,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       const sessionId = file.replace(".jsonl", "");
       const fullPath = path.join(projPath, file);
 
-      let fileStat;
+      let fileStat: Awaited<ReturnType<typeof fs.stat>> | undefined;
       try {
         fileStat = await fs.stat(fullPath);
       } catch {
@@ -435,11 +437,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     index: SessionIndex,
     runningPids: Map<number, PidInfo>,
   ): Promise<AgentSession> {
-    const isRunning = await this.isSessionRunning(
-      entry,
-      index,
-      runningPids,
-    );
+    const isRunning = await this.isSessionRunning(entry, index, runningPids);
 
     // Parse JSONL for token/model info (read last few lines for efficiency)
     const { model, tokens } = await this.parseSessionTail(entry.fullPath);
@@ -473,10 +471,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const projectPath = index.originalPath || entry.projectPath;
     if (!projectPath) return false;
 
+    const sessionCreated = new Date(entry.created).getTime();
+
     for (const [, info] of runningPids) {
-      if (info.cwd === projectPath) return true;
-      // Also check if the session ID appears in the command args
-      if (info.args.includes(entry.sessionId)) return true;
+      // Check if the session ID appears in the command args — most reliable match
+      if (info.args.includes(entry.sessionId)) {
+        if (this.processStartedAfterSession(info, sessionCreated)) return true;
+        // PID recycling: process started before this session existed
+        continue;
+      }
+      // Match by cwd — less specific (multiple sessions share a project)
+      if (info.cwd === projectPath) {
+        if (this.processStartedAfterSession(info, sessionCreated)) return true;
+      }
     }
 
     // Fallback: check if JSONL was modified very recently (last 60s)
@@ -484,8 +491,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       const stat = await fs.stat(entry.fullPath);
       const age = Date.now() - stat.mtimeMs;
       if (age < 60_000) {
-        // Double-check: is there any claude process running?
-        return runningPids.size > 0;
+        // Double-check: is there any claude process running with matching cwd
+        // that started after this session?
+        for (const [, info] of runningPids) {
+          if (
+            info.cwd === projectPath &&
+            this.processStartedAfterSession(info, sessionCreated)
+          ) {
+            return true;
+          }
+        }
       }
     } catch {
       // file doesn't exist
@@ -494,16 +509,40 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return false;
   }
 
+  /**
+   * Check whether a process plausibly belongs to a session by verifying
+   * the process started at or after the session's creation time.
+   * This detects PID recycling: if a process started before the session
+   * was created, it can't be the process that's running this session.
+   * When start time is unavailable, defaults to true (assume match).
+   */
+  private processStartedAfterSession(
+    info: PidInfo,
+    sessionCreatedMs: number,
+  ): boolean {
+    if (!info.startTime) return true; // Can't verify — assume match
+    const processStartMs = new Date(info.startTime).getTime();
+    if (Number.isNaN(processStartMs)) return true; // Unparseable — assume match
+    // Allow 5s tolerance for clock skew between session creation time and ps output
+    return processStartMs >= sessionCreatedMs - 5000;
+  }
+
   private findMatchingPid(
     entry: SessionIndexEntry,
     index: SessionIndex,
     runningPids: Map<number, PidInfo>,
   ): number | undefined {
     const projectPath = index.originalPath || entry.projectPath;
+    const sessionCreated = new Date(entry.created).getTime();
 
     for (const [pid, info] of runningPids) {
-      if (info.cwd === projectPath) return pid;
-      if (info.args.includes(entry.sessionId)) return pid;
+      if (info.args.includes(entry.sessionId)) {
+        if (this.processStartedAfterSession(info, sessionCreated)) return pid;
+        continue;
+      }
+      if (info.cwd === projectPath) {
+        if (this.processStartedAfterSession(info, sessionCreated)) return pid;
+      }
     }
 
     return undefined;
@@ -555,16 +594,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
       return {
         model,
-        tokens: totalIn || totalOut ? { in: totalIn, out: totalOut } : undefined,
+        tokens:
+          totalIn || totalOut ? { in: totalIn, out: totalOut } : undefined,
       };
     } catch {
       return {};
     }
   }
 
-  private async findSessionFile(
-    sessionId: string,
-  ): Promise<string | null> {
+  private async findSessionFile(sessionId: string): Promise<string | null> {
     const entry = await this.findIndexEntry(sessionId);
     if (!entry) return null;
     try {
@@ -602,9 +640,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     return null;
   }
 
-  private async findPidForSession(
-    sessionId: string,
-  ): Promise<number | null> {
+  private async findPidForSession(sessionId: string): Promise<number | null> {
     const session = await this.status(sessionId);
     return session.pid ?? null;
   }
@@ -616,9 +652,7 @@ async function getClaudePids(): Promise<Map<number, PidInfo>> {
   const pids = new Map<number, PidInfo>();
 
   try {
-    const { stdout } = await execFileAsync("ps", [
-      "aux",
-    ]);
+    const { stdout } = await execFileAsync("ps", ["aux"]);
 
     for (const line of stdout.split("\n")) {
       if (!line.includes("claude") || line.includes("grep")) continue;
@@ -655,7 +689,21 @@ async function getClaudePids(): Promise<Map<number, PidInfo>> {
         // lsof might fail — that's fine
       }
 
-      pids.set(pid, { pid, cwd, args: command });
+      // Get process start time for PID recycling detection
+      let startTime: string | undefined;
+      try {
+        const { stdout: lstart } = await execFileAsync("ps", [
+          "-p",
+          pid.toString(),
+          "-o",
+          "lstart=",
+        ]);
+        startTime = lstart.trim() || undefined;
+      } catch {
+        // ps might fail — that's fine
+      }
+
+      pids.set(pid, { pid, cwd, args: command, startTime });
     }
   } catch {
     // ps failed — return empty
@@ -671,7 +719,7 @@ function extractTextContent(
   if (Array.isArray(content)) {
     return content
       .filter((b) => b.type === "text" && b.text)
-      .map((b) => b.text!)
+      .map((b) => b.text as string)
       .join("\n");
   }
   return "";

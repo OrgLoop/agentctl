@@ -10,7 +10,12 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "format": "biome format --write src/",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "author": "Charlie Hulcher <charlie.hulcher@gmail.com>",
   "license": "MIT",
@@ -21,5 +26,8 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.2"
   }
 }
