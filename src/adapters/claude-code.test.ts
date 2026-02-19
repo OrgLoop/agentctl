@@ -15,10 +15,10 @@ let sessionsMetaDir: string;
 let adapter: ClaudeCodeAdapter;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-ctl-test-"));
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-test-"));
   claudeDir = path.join(tmpDir, ".claude");
   projectsDir = path.join(claudeDir, "projects");
-  sessionsMetaDir = path.join(claudeDir, "agent-ctl", "sessions");
+  sessionsMetaDir = path.join(claudeDir, "agentctl", "sessions");
   await fs.mkdir(projectsDir, { recursive: true });
   await fs.mkdir(sessionsMetaDir, { recursive: true });
 

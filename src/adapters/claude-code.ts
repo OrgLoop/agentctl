@@ -108,7 +108,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     this.projectsDir = path.join(this.claudeDir, "projects");
     this.sessionsMetaDir =
       opts?.sessionsMetaDir ||
-      path.join(this.claudeDir, "agent-ctl", "sessions");
+      path.join(this.claudeDir, "agentctl", "sessions");
     this.getPids = opts?.getPids || getClaudePids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
   }
