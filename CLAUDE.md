@@ -1,4 +1,4 @@
-# agent-ctl
+# agentctl
 
 Universal agent supervision interface — monitor and control AI coding agents from a single CLI.
 
@@ -7,7 +7,7 @@ Universal agent supervision interface — monitor and control AI coding agents f
 ```bash
 npm install
 npm run build
-npm link         # makes `agent-ctl` available globally
+npm link         # makes `agentctl` available globally
 ```
 
 ## Development
@@ -27,6 +27,14 @@ npm run lint:fix   # biome check --write
 - `src/adapters/claude-code.ts` — Claude Code adapter (reads ~/.claude/, cross-refs PIDs)
 - `src/adapters/openclaw.ts` — OpenClaw gateway adapter (WebSocket RPC)
 - `src/cli.ts` — CLI entry point (commander)
+- `src/daemon/server.ts` — Daemon: Unix socket server + HTTP metrics
+- `src/daemon/session-tracker.ts` — Session lifecycle tracking
+- `src/daemon/lock-manager.ts` — Auto + manual directory locks
+- `src/daemon/fuse-engine.ts` — Kind cluster fuse timers
+- `src/daemon/metrics.ts` — Prometheus metrics registry
+- `src/daemon/state.ts` — State persistence layer
+- `src/client/daemon-client.ts` — Unix socket client for CLI
+- `src/migration/migrate-locks.ts` — Migration from ~/.openclaw/locks
 
 ## Conventions
 

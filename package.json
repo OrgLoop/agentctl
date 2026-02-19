@@ -1,10 +1,11 @@
 {
-  "name": "agent-ctl",
-  "version": "0.1.0",
+  "name": "agentctl",
+  "version": "0.2.0-alpha.1",
   "description": "Universal agent supervision interface",
   "type": "module",
   "bin": {
-    "agent-ctl": "./dist/cli.js"
+    "agentctl": "./dist/cli.js",
+    "agent-ctl": "./dist/compat-shim.js"
   },
   "scripts": {
     "build": "tsc",
