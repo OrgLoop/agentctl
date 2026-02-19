@@ -179,11 +179,11 @@ export class OpenClawAdapter implements AgentAdapter {
   }
 
   async launch(_opts: LaunchOpts): Promise<AgentSession> {
-    throw new Error("OpenClaw sessions cannot be launched via agent-ctl");
+    throw new Error("OpenClaw sessions cannot be launched via agentctl");
   }
 
   async stop(_sessionId: string, _opts?: StopOpts): Promise<void> {
-    throw new Error("OpenClaw sessions cannot be stopped via agent-ctl");
+    throw new Error("OpenClaw sessions cannot be stopped via agentctl");
   }
 
   async resume(sessionId: string, _message: string): Promise<void> {
@@ -361,7 +361,7 @@ export class OpenClawAdapter implements AgentAdapter {
                   minProtocol: 1,
                   maxProtocol: 1,
                   client: {
-                    id: "agent-ctl",
+                    id: "agentctl",
                     version: "0.1.0",
                     platform: process.platform,
                     mode: "cli",

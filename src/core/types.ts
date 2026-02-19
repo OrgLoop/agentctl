@@ -1,4 +1,4 @@
-// agent-ctl core types — Universal Agent Supervision Interface
+// agentctl core types — Universal Agent Supervision Interface
 
 export interface AgentAdapter {
   id: string; // "claude-code", "openclaw", etc.

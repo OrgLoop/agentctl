@@ -109,9 +109,9 @@ function sessionToJson(s: AgentSession): Record<string, unknown> {
 const program = new Command();
 
 program
-  .name("agent-ctl")
+  .name("agentctl")
   .description("Universal agent supervision interface")
-  .version("0.1.0");
+  .version("0.2.0-alpha.1");
 
 // list
 program
