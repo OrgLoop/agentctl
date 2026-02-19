@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 console.error(
   "\u26a0\ufe0f  agent-ctl is renamed to agentctl. Please update your scripts.",

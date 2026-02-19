@@ -1,18 +1,27 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
+import { DaemonClient } from "./client/daemon-client.js";
 import type { AgentAdapter, AgentSession, ListOpts } from "./core/types.js";
+import type { DaemonStatus } from "./daemon/server.js";
+import type { FuseTimer, Lock, SessionRecord } from "./daemon/state.js";
 
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
   openclaw: new OpenClawAdapter(),
 };
 
+const client = new DaemonClient();
+
 function getAdapter(name?: string): AgentAdapter {
   if (!name) {
-    // Default to claude-code (only adapter for now)
     return adapters["claude-code"];
   }
   const adapter = adapters[name];
@@ -41,6 +50,18 @@ function formatSession(s: AgentSession): Record<string, string> {
   };
 }
 
+function formatRecord(s: SessionRecord): Record<string, string> {
+  return {
+    ID: s.id.slice(0, 8),
+    Status: s.status,
+    Model: s.model || "-",
+    CWD: s.cwd ? shortenPath(s.cwd) : "-",
+    PID: s.pid?.toString() || "-",
+    Started: timeAgo(new Date(s.startedAt)),
+    Prompt: (s.prompt || "-").slice(0, 60),
+  };
+}
+
 function shortenPath(p: string): string {
   const home = process.env.HOME || "";
   if (p.startsWith(home)) return `~${p.slice(home.length)}`;
@@ -58,6 +79,16 @@ function timeAgo(date: Date): string {
   return `${days}d ago`;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 0) return "expired";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 function printTable(rows: Record<string, string>[]): void {
   if (rows.length === 0) {
     console.log("No sessions found.");
@@ -69,12 +100,10 @@ function printTable(rows: Record<string, string>[]): void {
     Math.max(k.length, ...rows.map((r) => (r[k] || "").length)),
   );
 
-  // Header
   const header = keys.map((k, i) => k.padEnd(widths[i])).join("  ");
   console.log(header);
   console.log(widths.map((w) => "-".repeat(w)).join("  "));
 
-  // Rows
   for (const row of rows) {
     const line = keys
       .map((k, i) => (row[k] || "").padEnd(widths[i]))
@@ -122,18 +151,29 @@ program
   .option("-a, --all", "Include stopped sessions (last 7 days)")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
-    const listOpts: ListOpts = {
-      status: opts.status,
-      all: opts.all,
-    };
+    const daemonRunning = await client.isRunning();
 
+    if (daemonRunning) {
+      const sessions = await client.call<SessionRecord[]>("session.list", {
+        status: opts.status,
+        all: opts.all,
+      });
+      if (opts.json) {
+        printJson(sessions);
+      } else {
+        printTable(sessions.map(formatRecord));
+      }
+      return;
+    }
+
+    // Direct fallback
+    const listOpts: ListOpts = { status: opts.status, all: opts.all };
     let sessions: AgentSession[] = [];
 
     if (opts.adapter) {
       const adapter = getAdapter(opts.adapter);
       sessions = await adapter.list(listOpts);
     } else {
-      // All adapters
       for (const adapter of getAllAdapters()) {
         const s = await adapter.list(listOpts);
         sessions.push(...s);
@@ -154,6 +194,34 @@ program
   .option("--adapter <name>", "Adapter to use")
   .option("--json", "Output as JSON")
   .action(async (id: string, opts) => {
+    const daemonRunning = await client.isRunning();
+
+    if (daemonRunning) {
+      try {
+        const session = await client.call<SessionRecord>("session.status", {
+          id,
+        });
+        if (opts.json) {
+          printJson(session);
+        } else {
+          const fmt = formatRecord(session);
+          for (const [k, v] of Object.entries(fmt)) {
+            console.log(`${k.padEnd(10)} ${v}`);
+          }
+          if (session.tokens) {
+            console.log(
+              `Tokens     in: ${session.tokens.in}, out: ${session.tokens.out}`,
+            );
+          }
+        }
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
+    // Direct fallback
     const adapter = getAdapter(opts.adapter);
     try {
       const session = await adapter.status(id);
@@ -183,10 +251,26 @@ program
   .option("-n, --lines <n>", "Number of recent messages", "20")
   .option("--adapter <name>", "Adapter to use")
   .action(async (id: string, opts) => {
+    const daemonRunning = await client.isRunning();
+
+    if (daemonRunning) {
+      try {
+        const output = await client.call<string>("session.peek", {
+          id,
+          lines: Number.parseInt(opts.lines, 10),
+        });
+        console.log(output);
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
     const adapter = getAdapter(opts.adapter);
     try {
       const output = await adapter.peek(id, {
-        lines: parseInt(opts.lines, 10),
+        lines: Number.parseInt(opts.lines, 10),
       });
       console.log(output);
     } catch (err) {
@@ -202,6 +286,22 @@ program
   .option("--force", "Force kill (SIGINT then SIGKILL)")
   .option("--adapter <name>", "Adapter to use")
   .action(async (id: string, opts) => {
+    const daemonRunning = await client.isRunning();
+
+    if (daemonRunning) {
+      try {
+        await client.call("session.stop", {
+          id,
+          force: opts.force,
+        });
+        console.log(`Stopped session ${id.slice(0, 8)}`);
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
     const adapter = getAdapter(opts.adapter);
     try {
       await adapter.stop(id, { force: opts.force });
@@ -218,6 +318,19 @@ program
   .description("Resume a session with a new message")
   .option("--adapter <name>", "Adapter to use")
   .action(async (id: string, message: string, opts) => {
+    const daemonRunning = await client.isRunning();
+
+    if (daemonRunning) {
+      try {
+        await client.call("session.resume", { id, message });
+        console.log(`Resumed session ${id.slice(0, 8)}`);
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
     const adapter = getAdapter(opts.adapter);
     try {
       await adapter.resume(id, message);
@@ -230,17 +343,48 @@ program
 
 // launch
 program
-  .command("launch <adapter>")
+  .command("launch [adapter]")
   .description("Launch a new agent session")
   .requiredOption("-p, --prompt <text>", "Prompt to send")
   .option("--spec <path>", "Spec file path")
   .option("--cwd <dir>", "Working directory")
   .option("--model <model>", "Model to use (e.g. sonnet, opus)")
-  .action(async (adapterName: string, opts) => {
-    const adapter = getAdapter(adapterName);
+  .option("--force", "Override directory locks")
+  .action(async (adapterName: string | undefined, opts) => {
+    const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+    const name = adapterName || "claude-code";
+    const daemonRunning = await client.isRunning();
+
+    if (daemonRunning) {
+      try {
+        const session = await client.call<SessionRecord>("session.launch", {
+          adapter: name,
+          prompt: opts.prompt,
+          cwd,
+          spec: opts.spec,
+          model: opts.model,
+          force: opts.force,
+        });
+        console.log(
+          `Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`,
+        );
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
+    // Direct fallback
+    if (!opts.force) {
+      console.error(
+        "Warning: Daemon not running, launching without lock protection",
+      );
+    }
+    const adapter = getAdapter(name);
     try {
       const session = await adapter.launch({
-        adapter: adapterName,
+        adapter: name,
         prompt: opts.prompt,
         spec: opts.spec,
         cwd: opts.cwd,
@@ -274,5 +418,217 @@ program
       console.log(JSON.stringify(out));
     }
   });
+
+// --- Lock commands ---
+
+program
+  .command("lock <directory>")
+  .description("Manually lock a directory")
+  .option("--by <name>", "Who is locking", os.userInfo().username)
+  .option("--reason <reason>", "Why")
+  .action(async (directory: string, opts) => {
+    const absDir = path.resolve(directory);
+    try {
+      await client.call<Lock>("lock.acquire", {
+        directory: absDir,
+        by: opts.by,
+        reason: opts.reason,
+      });
+      console.log(`Locked: ${absDir}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("unlock <directory>")
+  .description("Unlock a manually locked directory")
+  .action(async (directory: string) => {
+    const absDir = path.resolve(directory);
+    try {
+      await client.call("lock.release", { directory: absDir });
+      console.log(`Unlocked: ${absDir}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("locks")
+  .description("List all directory locks")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    try {
+      const locks = await client.call<Lock[]>("lock.list");
+      if (opts.json) {
+        printJson(locks);
+        return;
+      }
+      if (locks.length === 0) {
+        console.log("No active locks");
+        return;
+      }
+      printTable(
+        locks.map((l) => ({
+          Directory: shortenPath(l.directory),
+          Type: l.type,
+          "Locked By": l.lockedBy || l.sessionId?.slice(0, 8) || "-",
+          Reason: l.reason || "-",
+          Since: timeAgo(new Date(l.lockedAt)),
+        })),
+      );
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// --- Fuses command ---
+
+program
+  .command("fuses")
+  .description("List active Kind cluster fuse timers")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    try {
+      const fuses = await client.call<FuseTimer[]>("fuse.list");
+      if (opts.json) {
+        printJson(fuses);
+        return;
+      }
+      if (fuses.length === 0) {
+        console.log("No active fuses");
+        return;
+      }
+      printTable(
+        fuses.map((f) => ({
+          Directory: shortenPath(f.directory),
+          Cluster: f.clusterName,
+          "Expires In": formatDuration(
+            new Date(f.expiresAt).getTime() - Date.now(),
+          ),
+        })),
+      );
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// --- Daemon subcommand ---
+
+const daemonCmd = new Command("daemon").description(
+  "Manage the agentctl daemon",
+);
+
+daemonCmd
+  .command("start")
+  .description("Start the daemon")
+  .option("--foreground", "Run in foreground (don't daemonize)")
+  .option("--metrics-port <port>", "Prometheus metrics port", "9200")
+  .action(async (opts) => {
+    if (!opts.foreground) {
+      const __filename = fileURLToPath(import.meta.url);
+      const logDir = path.join(os.homedir(), ".agentctl");
+      await fs.mkdir(logDir, { recursive: true });
+
+      const child = spawn(
+        process.execPath,
+        [
+          __filename,
+          "daemon",
+          "start",
+          "--foreground",
+          "--metrics-port",
+          opts.metricsPort,
+        ],
+        {
+          detached: true,
+          stdio: [
+            "ignore",
+            (await fs.open(path.join(logDir, "daemon.stdout.log"), "a")).fd,
+            (await fs.open(path.join(logDir, "daemon.stderr.log"), "a")).fd,
+          ],
+        },
+      );
+      child.unref();
+      console.log(`Daemon started (PID ${child.pid})`);
+      return;
+    }
+
+    // Foreground mode — import and start
+    const { startDaemon } = await import("./daemon/server.js");
+    await startDaemon({
+      metricsPort: Number(opts.metricsPort),
+    });
+  });
+
+daemonCmd
+  .command("stop")
+  .description("Stop the daemon")
+  .action(async () => {
+    try {
+      await client.call("daemon.shutdown");
+      console.log("Daemon stopped");
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+daemonCmd
+  .command("status")
+  .description("Show daemon status")
+  .action(async () => {
+    try {
+      const status = await client.call<DaemonStatus>("daemon.status");
+      console.log(`Daemon running (PID ${status.pid})`);
+      console.log(`  Uptime: ${formatDuration(status.uptime)}`);
+      console.log(`  Active sessions: ${status.sessions}`);
+      console.log(`  Active locks: ${status.locks}`);
+      console.log(`  Active fuses: ${status.fuses}`);
+    } catch {
+      console.log("Daemon not running");
+    }
+  });
+
+daemonCmd
+  .command("install")
+  .description("Install LaunchAgent (auto-start on login)")
+  .action(async () => {
+    const { generatePlist } = await import("./daemon/launchagent.js");
+    const plistPath = path.join(
+      os.homedir(),
+      "Library/LaunchAgents/com.agentctl.daemon.plist",
+    );
+    const plistContent = generatePlist();
+    await fs.mkdir(path.dirname(plistPath), { recursive: true });
+    await fs.writeFile(plistPath, plistContent);
+    const { execSync } = await import("node:child_process");
+    execSync(`launchctl load ${plistPath}`);
+    console.log("LaunchAgent installed. Daemon will start on login.");
+  });
+
+daemonCmd
+  .command("uninstall")
+  .description("Remove LaunchAgent")
+  .action(async () => {
+    const plistPath = path.join(
+      os.homedir(),
+      "Library/LaunchAgents/com.agentctl.daemon.plist",
+    );
+    const { execSync } = await import("node:child_process");
+    try {
+      execSync(`launchctl unload ${plistPath}`);
+    } catch {
+      // Already unloaded
+    }
+    await fs.rm(plistPath, { force: true });
+    console.log("LaunchAgent removed.");
+  });
+
+program.addCommand(daemonCmd);
 
 program.parse();
