@@ -1,12 +1,17 @@
 {
   "name": "agentctl",
-  "version": "0.2.0-alpha.1",
-  "description": "Universal agent supervision interface",
+  "version": "0.3.0",
+  "description": "Universal agent supervision interface — monitor and control AI coding agents from a single CLI",
   "type": "module",
   "bin": {
     "agentctl": "./dist/cli.js",
     "agent-ctl": "./dist/compat-shim.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
@@ -18,9 +23,27 @@
     "format": "biome format --write src/",
     "prepare": "git config core.hooksPath .githooks"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/c-h-/agentctl.git"
+  },
+  "homepage": "https://github.com/c-h-/agentctl#readme",
+  "bugs": {
+    "url": "https://github.com/c-h-/agentctl/issues"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "ai",
+    "supervisor",
+    "claude",
+    "coding-agent"
+  ],
   "author": "Charlie Hulcher <charlie.hulcher@gmail.com>",
   "license": "MIT",
-  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@types/node": "^25.2.3",
     "commander": "^14.0.3",
