@@ -20,6 +20,44 @@ const adapters: Record<string, AgentAdapter> = {
 
 const client = new DaemonClient();
 
+/**
+ * Ensure the daemon is running. Auto-starts it if not.
+ * Returns true if daemon is available after the call.
+ */
+async function ensureDaemon(): Promise<boolean> {
+  if (await client.isRunning()) return true;
+
+  // Auto-start daemon in background
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const logDir = path.join(os.homedir(), ".agentctl");
+    await fs.mkdir(logDir, { recursive: true });
+
+    const child = spawn(
+      process.execPath,
+      [__filename, "daemon", "start", "--foreground"],
+      {
+        detached: true,
+        stdio: [
+          "ignore",
+          (await fs.open(path.join(logDir, "daemon.stdout.log"), "a")).fd,
+          (await fs.open(path.join(logDir, "daemon.stderr.log"), "a")).fd,
+        ],
+      },
+    );
+    child.unref();
+
+    // Wait briefly for daemon to be ready (up to 3s)
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      if (await client.isRunning()) return true;
+    }
+  } catch {
+    // Failed to auto-start — fall through to direct mode
+  }
+  return false;
+}
+
 function getAdapter(name?: string): AgentAdapter {
   if (!name) {
     return adapters["claude-code"];
@@ -140,7 +178,7 @@ const program = new Command();
 program
   .name("agentctl")
   .description("Universal agent supervision interface")
-  .version("0.2.0-alpha.1");
+  .version("0.3.0");
 
 // list
 program
@@ -151,7 +189,7 @@ program
   .option("-a, --all", "Include stopped sessions (last 7 days)")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
-    const daemonRunning = await client.isRunning();
+    const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
       const sessions = await client.call<SessionRecord[]>("session.list", {
@@ -194,7 +232,7 @@ program
   .option("--adapter <name>", "Adapter to use")
   .option("--json", "Output as JSON")
   .action(async (id: string, opts) => {
-    const daemonRunning = await client.isRunning();
+    const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
       try {
@@ -251,7 +289,7 @@ program
   .option("-n, --lines <n>", "Number of recent messages", "20")
   .option("--adapter <name>", "Adapter to use")
   .action(async (id: string, opts) => {
-    const daemonRunning = await client.isRunning();
+    const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
       try {
@@ -286,7 +324,7 @@ program
   .option("--force", "Force kill (SIGINT then SIGKILL)")
   .option("--adapter <name>", "Adapter to use")
   .action(async (id: string, opts) => {
-    const daemonRunning = await client.isRunning();
+    const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
       try {
@@ -318,7 +356,7 @@ program
   .description("Resume a session with a new message")
   .option("--adapter <name>", "Adapter to use")
   .action(async (id: string, message: string, opts) => {
-    const daemonRunning = await client.isRunning();
+    const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
       try {
@@ -353,7 +391,7 @@ program
   .action(async (adapterName: string | undefined, opts) => {
     const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
     const name = adapterName || "claude-code";
-    const daemonRunning = await client.isRunning();
+    const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
       try {
@@ -592,6 +630,37 @@ daemonCmd
     } catch {
       console.log("Daemon not running");
     }
+  });
+
+daemonCmd
+  .command("restart")
+  .description("Restart the daemon")
+  .action(async () => {
+    try {
+      await client.call("daemon.shutdown");
+    } catch {
+      // Daemon wasn't running — that's fine
+    }
+    // Wait for old daemon to exit
+    await new Promise((r) => setTimeout(r, 500));
+    // Start new daemon
+    const __filename = fileURLToPath(import.meta.url);
+    const logDir = path.join(os.homedir(), ".agentctl");
+    await fs.mkdir(logDir, { recursive: true });
+    const child = spawn(
+      process.execPath,
+      [__filename, "daemon", "start", "--foreground"],
+      {
+        detached: true,
+        stdio: [
+          "ignore",
+          (await fs.open(path.join(logDir, "daemon.stdout.log"), "a")).fd,
+          (await fs.open(path.join(logDir, "daemon.stderr.log"), "a")).fd,
+        ],
+      },
+    );
+    child.unref();
+    console.log(`Daemon restarted (PID ${child.pid})`);
   });
 
 daemonCmd
