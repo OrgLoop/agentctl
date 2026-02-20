@@ -90,14 +90,33 @@ export class OpenClawAdapter implements AgentAdapter {
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {
+    if (!this.authToken) {
+      console.warn(
+        "Warning: OPENCLAW_WEBHOOK_TOKEN is not set — OpenClaw adapter cannot authenticate. " +
+          "Set this environment variable to connect to the gateway.",
+      );
+      return [];
+    }
+
     let result: SessionsListResult;
     try {
       result = (await this.rpcCall("sessions.list", {
         includeDerivedTitles: true,
         includeLastMessage: true,
       })) as SessionsListResult;
-    } catch {
-      // Gateway unreachable — return empty
+    } catch (err) {
+      const msg = (err as Error)?.message || "unknown error";
+      if (msg.includes("auth") || msg.includes("Auth")) {
+        console.warn(
+          `Warning: OpenClaw gateway authentication failed: ${msg}. ` +
+            "Check that OPENCLAW_WEBHOOK_TOKEN is valid.",
+        );
+      } else {
+        console.warn(
+          `Warning: OpenClaw gateway unreachable (${msg}). ` +
+            `Is the gateway running at ${this.baseUrl}?`,
+        );
+      }
       return [];
     }
 
@@ -153,6 +172,12 @@ export class OpenClawAdapter implements AgentAdapter {
   }
 
   async status(sessionId: string): Promise<AgentSession> {
+    if (!this.authToken) {
+      throw new Error(
+        "OPENCLAW_WEBHOOK_TOKEN is not set — cannot connect to OpenClaw gateway",
+      );
+    }
+
     let result: SessionsListResult;
     try {
       result = (await this.rpcCall("sessions.list", {
@@ -294,13 +319,21 @@ export class OpenClawAdapter implements AgentAdapter {
    * Resolve a sessionId (or prefix) to a gateway session key.
    */
   private async resolveKey(sessionId: string): Promise<string | null> {
+    if (!this.authToken) {
+      throw new Error(
+        "OPENCLAW_WEBHOOK_TOKEN is not set — cannot connect to OpenClaw gateway",
+      );
+    }
+
     let result: SessionsListResult;
     try {
       result = (await this.rpcCall("sessions.list", {
         search: sessionId,
       })) as SessionsListResult;
-    } catch {
-      return null;
+    } catch (err) {
+      throw new Error(
+        `Failed to resolve session ${sessionId}: ${(err as Error).message}`,
+      );
     }
 
     const row = result.sessions.find(

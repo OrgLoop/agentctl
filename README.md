@@ -28,7 +28,7 @@ Over time, agentctl can extend to handle more concerns of headless coding — au
 ## Installation
 
 ```bash
-npm install -g agentctl
+npm install -g @orgloop/agentctl
 ```
 
 Requires Node.js >= 20.
@@ -90,6 +90,11 @@ agentctl stop <id> [options]
 agentctl resume <id> <message> [options]
   --adapter <name>     Adapter to use
 
+# <message> is a continuation prompt sent to the agent.
+# The agent receives it as new user input and resumes work.
+# Example: resume a stopped session with a follow-up instruction
+agentctl resume abc123 "fix the failing tests and re-run the suite"
+
 agentctl events [options]
   --json               Output as NDJSON (default)
 ```
@@ -109,13 +114,66 @@ agentctl locks [options]
   --json               Output as JSON
 ```
 
-### Fuse Timers
+### Lifecycle Hooks
 
-For Kind cluster management — automatically shuts down clusters when sessions end.
+Hooks are shell commands that run at specific points in a session's lifecycle. Pass them as flags to `launch` or `merge`:
 
 ```bash
+agentctl launch -p "implement feature X" \
+  --on-create "echo 'Session $AGENTCTL_SESSION_ID started'" \
+  --on-complete "npm test"
+
+agentctl merge <id> \
+  --pre-merge "npm run lint && npm test" \
+  --post-merge "curl -X POST https://slack.example.com/webhook -d '{\"text\": \"PR merged\"}'"
+```
+
+Available hooks:
+
+| Hook | Trigger | Typical use |
+|------|---------|-------------|
+| `--on-create <script>` | After a session is created | Notify, set up environment |
+| `--on-complete <script>` | After a session completes | Run tests, send alerts |
+| `--pre-merge <script>` | Before `agentctl merge` commits | Lint, test, validate |
+| `--post-merge <script>` | After `agentctl merge` pushes/opens PR | Notify, trigger CI |
+
+Hook scripts receive context via environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `AGENTCTL_SESSION_ID` | Session UUID |
+| `AGENTCTL_CWD` | Working directory of the session |
+| `AGENTCTL_ADAPTER` | Adapter name (e.g. `claude-code`) |
+| `AGENTCTL_BRANCH` | Git branch (when using `--worktree`) |
+| `AGENTCTL_EXIT_CODE` | Process exit code (in `--on-complete`) |
+
+Hooks run with a 60-second timeout. If a hook fails, its stderr is printed but execution continues.
+
+### Fuse Timers
+
+Fuse timers provide automatic cleanup of [Kind](https://kind.sigs.k8s.io/) Kubernetes clusters tied to coding sessions. When a session exits, agentctl starts a countdown timer. If no new session starts in the same worktree directory before the timer expires, the associated Kind cluster is deleted to free resources.
+
+This is useful when running agents in worktree-per-branch workflows where each branch has its own Kind cluster (e.g. `kindo-charlie-<branch>`). Without fuse timers, forgotten clusters accumulate and waste resources.
+
+**How it works:**
+
+1. Agent session exits in a worktree directory (e.g. `~/code/mono-my-feature`)
+2. agentctl derives the cluster name (`kindo-charlie-my-feature`) and starts a fuse timer
+3. If the timer expires (default: configured at daemon startup), the cluster is deleted via `kind delete cluster`
+4. If a new session starts in the same directory before expiry, the fuse is cancelled
+
+```bash
+# List active fuse timers
 agentctl fuses [options]
   --json               Output as JSON
+```
+
+Example output:
+
+```
+Directory             Cluster                     Expires In
+~/code/mono-feat-x    kindo-charlie-feat-x        12m
+~/code/mono-hotfix    kindo-charlie-hotfix        45m
 ```
 
 ### Daemon
@@ -135,7 +193,76 @@ agentctl daemon install    # Install macOS LaunchAgent (auto-start on login)
 agentctl daemon uninstall  # Remove LaunchAgent
 ```
 
-Metrics are exposed at `http://localhost:9200/metrics` in Prometheus text format.
+Metrics are exposed at `http://localhost:9200/metrics` in Prometheus text format. See [Prometheus Metrics](#prometheus-metrics) for the full list.
+
+### Events
+
+`agentctl events` streams session lifecycle events as NDJSON (newline-delimited JSON). Each line is a self-contained JSON object:
+
+```json
+{"type":"session.started","adapter":"claude-code","sessionId":"abc123...","timestamp":"2025-06-15T10:30:00.000Z","session":{...}}
+{"type":"session.stopped","adapter":"claude-code","sessionId":"abc123...","timestamp":"2025-06-15T11:00:00.000Z","session":{...}}
+{"type":"session.idle","adapter":"claude-code","sessionId":"def456...","timestamp":"2025-06-15T11:05:00.000Z","session":{...}}
+```
+
+Event types: `session.started`, `session.stopped`, `session.idle`, `session.error`.
+
+The `session` field contains the full session object (id, adapter, status, cwd, model, prompt, tokens, etc.).
+
+**Piping events into OrgLoop (or similar event routers):**
+
+```bash
+# Pipe lifecycle events to OrgLoop's webhook endpoint
+agentctl events | while IFS= read -r event; do
+  curl -s -X POST https://orgloop.example.com/hooks/agentctl \
+    -H "Content-Type: application/json" \
+    -d "$event"
+done
+
+# Or use a persistent pipe with jq filtering
+agentctl events | jq -c 'select(.type == "session.stopped")' | while IFS= read -r event; do
+  curl -s -X POST https://orgloop.example.com/hooks/session-ended \
+    -H "Content-Type: application/json" \
+    -d "$event"
+done
+```
+
+This pattern works with any webhook-based system — OrgLoop, Zapier, n8n, or a custom event router. The NDJSON format is compatible with standard Unix tools (`jq`, `grep`, `awk`) for filtering and transformation.
+
+## Prometheus Metrics
+
+The daemon exposes metrics at `http://localhost:9200/metrics` in Prometheus text format. Default port is 9200, configurable via `--metrics-port`.
+
+### Gauges
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `agentctl_sessions_active` | — | Number of currently active sessions |
+| `agentctl_locks_active` | `type="auto"\|"manual"` | Number of active directory locks by type |
+| `agentctl_fuses_active` | — | Number of active fuse timers |
+
+### Counters
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `agentctl_sessions_total` | `status="completed"\|"failed"\|"stopped"` | Total sessions by final status |
+| `agentctl_fuses_fired_total` | — | Total fuse timers that fired (clusters deleted) |
+| `agentctl_kind_clusters_deleted_total` | — | Total Kind clusters deleted by fuse timers |
+
+### Histogram
+
+| Metric | Buckets (seconds) | Description |
+|--------|-------------------|-------------|
+| `agentctl_session_duration_seconds` | 60, 300, 600, 1800, 3600, 7200, +Inf | Session duration distribution |
+
+Example scrape config for Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: agentctl
+    static_configs:
+      - targets: ["localhost:9200"]
+```
 
 ## Architecture
 
@@ -154,6 +281,8 @@ Reads session data from `~/.claude/projects/` and cross-references with running 
 ### OpenClaw
 
 Connects to the OpenClaw gateway via WebSocket RPC. Read-only — sessions are managed through the gateway.
+
+Requires the `OPENCLAW_WEBHOOK_TOKEN` environment variable. The adapter warns clearly if the token is missing or authentication fails.
 
 ### Writing an Adapter
 
