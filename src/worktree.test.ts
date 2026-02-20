@@ -10,35 +10,37 @@ const execFileAsync = promisify(execFile);
 
 let tmpDir: string;
 let repoDir: string;
-let gitEnv: Record<string, string>;
+let savedEnv: Record<string, string | undefined>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-wt-test-"));
   repoDir = path.join(tmpDir, "repo");
   await fs.mkdir(repoDir, { recursive: true });
 
-  // Prevent git from discovering parent repos (critical during pre-push hooks)
-  gitEnv = { ...process.env, GIT_CEILING_DIRECTORIES: tmpDir } as Record<
-    string,
-    string
-  >;
+  // Sanitize process.env so ALL git subprocesses (including those spawned
+  // by source-code functions like createWorktree) are isolated from any
+  // parent repo. This is critical when tests run inside a pre-push hook,
+  // where GIT_DIR leaks and causes git commands to operate on the wrong repo.
+  savedEnv = {
+    GIT_DIR: process.env.GIT_DIR,
+    GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+    GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES,
+  };
+  delete process.env.GIT_DIR;
+  delete process.env.GIT_WORK_TREE;
+  process.env.GIT_CEILING_DIRECTORIES = tmpDir;
 
   // Initialize a git repo with a commit
-  await execFileAsync("git", ["init"], { cwd: repoDir, env: gitEnv });
+  await execFileAsync("git", ["init"], { cwd: repoDir });
   await execFileAsync("git", ["config", "user.email", "test@test.com"], {
     cwd: repoDir,
-    env: gitEnv,
   });
   await execFileAsync("git", ["config", "user.name", "Test"], {
     cwd: repoDir,
-    env: gitEnv,
   });
   await fs.writeFile(path.join(repoDir, "README.md"), "# Test repo");
-  await execFileAsync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
-  await execFileAsync("git", ["commit", "-m", "initial"], {
-    cwd: repoDir,
-    env: gitEnv,
-  });
+  await execFileAsync("git", ["add", "."], { cwd: repoDir });
+  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoDir });
 });
 
 afterEach(async () => {
@@ -47,7 +49,7 @@ afterEach(async () => {
     const { stdout } = await execFileAsync(
       "git",
       ["worktree", "list", "--porcelain"],
-      { cwd: repoDir, env: gitEnv },
+      { cwd: repoDir },
     );
     for (const line of stdout.split("\n")) {
       if (line.startsWith("worktree ") && !line.includes(repoDir)) {
@@ -56,7 +58,7 @@ afterEach(async () => {
           await execFileAsync(
             "git",
             ["worktree", "remove", "--force", wtPath],
-            { cwd: repoDir, env: gitEnv },
+            { cwd: repoDir },
           );
         } catch {
           // best effort
@@ -67,6 +69,15 @@ afterEach(async () => {
     // best effort
   }
   await fs.rm(tmpDir, { recursive: true, force: true });
+
+  // Restore original env
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 });
 
 describe("createWorktree", () => {
@@ -88,7 +99,7 @@ describe("createWorktree", () => {
     const { stdout } = await execFileAsync(
       "git",
       ["rev-parse", "--abbrev-ref", "HEAD"],
-      { cwd: result.path, env: gitEnv },
+      { cwd: result.path },
     );
     expect(stdout.trim()).toBe("feature/test-branch");
   });
