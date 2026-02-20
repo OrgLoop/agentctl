@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentSession } from "../core/types.js";
+import type { AgentAdapter, AgentSession } from "../core/types.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
@@ -174,6 +174,148 @@ describe("SessionTracker", () => {
 
     it("returns undefined for unknown session", () => {
       expect(tracker.onSessionExit("unknown")).toBeUndefined();
+    });
+  });
+
+  describe("ghost session reaping (issue #22)", () => {
+    /** Create a mock adapter that returns the given sessions from list() */
+    function mockAdapter(sessions: AgentSession[]): AgentAdapter {
+      return {
+        id: "mock",
+        list: async () => sessions,
+        peek: async () => "",
+        status: async () => sessions[0],
+        launch: async () => sessions[0],
+        stop: async () => {},
+        resume: async () => {},
+        async *events() {},
+      };
+    }
+
+    it("marks dead PID sessions as stopped during poll", async () => {
+      // Pre-seed state with a "running" session whose PID is dead
+      tracker.track(
+        makeSession({ id: "pending-12345", status: "running", pid: 12345 }),
+        "claude-code",
+      );
+
+      // Create tracker with dead-PID checker and an adapter that returns nothing
+      const reapTracker = new SessionTracker(state, {
+        adapters: { "claude-code": mockAdapter([]) },
+        isProcessAlive: () => false,
+      });
+
+      // Trigger a poll cycle
+      reapTracker.startPolling();
+      // Wait for poll to complete
+      await new Promise((r) => setTimeout(r, 100));
+      reapTracker.stopPolling();
+
+      const session = state.getSession("pending-12345");
+      expect(session?.status).toBe("stopped");
+      expect(session?.stoppedAt).toBeDefined();
+    });
+
+    it("removes pending-* entry when resolved session exists with same PID", async () => {
+      // Pre-seed state with a pending entry
+      tracker.track(
+        makeSession({ id: "pending-99999", status: "running", pid: 99999 }),
+        "claude-code",
+      );
+
+      // Adapter returns a resolved session with the same PID
+      const resolvedSession = makeSession({
+        id: "abc123-real-session-id",
+        status: "running",
+        pid: 99999,
+      });
+
+      const reapTracker = new SessionTracker(state, {
+        adapters: { "claude-code": mockAdapter([resolvedSession]) },
+        isProcessAlive: (pid) => pid === 99999,
+      });
+
+      reapTracker.startPolling();
+      await new Promise((r) => setTimeout(r, 100));
+      reapTracker.stopPolling();
+
+      // pending-* entry should be removed
+      expect(state.getSession("pending-99999")).toBeUndefined();
+      // Real session should exist
+      expect(state.getSession("abc123-real-session-id")).toBeDefined();
+      expect(state.getSession("abc123-real-session-id")?.status).toBe(
+        "running",
+      );
+    });
+
+    it("live PID sessions still show as running after poll", async () => {
+      tracker.track(
+        makeSession({ id: "live-session", status: "running", pid: 55555 }),
+        "claude-code",
+      );
+
+      // Adapter returns this session as running
+      const liveSession = makeSession({
+        id: "live-session",
+        status: "running",
+        pid: 55555,
+      });
+
+      const reapTracker = new SessionTracker(state, {
+        adapters: { "claude-code": mockAdapter([liveSession]) },
+        isProcessAlive: (pid) => pid === 55555,
+      });
+
+      reapTracker.startPolling();
+      await new Promise((r) => setTimeout(r, 100));
+      reapTracker.stopPolling();
+
+      const session = state.getSession("live-session");
+      expect(session?.status).toBe("running");
+      expect(session?.pid).toBe(55555);
+    });
+
+    it("listSessions deduplicates pending-* vs resolved entries by PID", () => {
+      // Both entries exist in state
+      tracker.track(
+        makeSession({ id: "pending-77777", status: "running", pid: 77777 }),
+        "claude-code",
+      );
+      tracker.track(
+        makeSession({
+          id: "real-session-uuid",
+          status: "running",
+          pid: 77777,
+        }),
+        "claude-code",
+      );
+
+      const list = tracker.listSessions({ all: true });
+      // Only the resolved session should appear
+      const ids = list.map((s) => s.id);
+      expect(ids).toContain("real-session-uuid");
+      expect(ids).not.toContain("pending-77777");
+    });
+
+    it("keeps pending-* entry if no resolved session shares its PID", () => {
+      // Only a pending entry, no resolved session with same PID
+      tracker.track(
+        makeSession({ id: "pending-44444", status: "running", pid: 44444 }),
+        "claude-code",
+      );
+      tracker.track(
+        makeSession({
+          id: "different-session",
+          status: "running",
+          pid: 88888,
+        }),
+        "claude-code",
+      );
+
+      const list = tracker.listSessions({ all: true });
+      const ids = list.map((s) => s.id);
+      expect(ids).toContain("pending-44444");
+      expect(ids).toContain("different-session");
     });
   });
 });

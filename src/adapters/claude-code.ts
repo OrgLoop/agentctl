@@ -259,7 +259,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       resolvedSessionId = await this.pollForSessionId(logPath, pid, 5000);
     }
 
-    const sessionId = resolvedSessionId || crypto.randomUUID();
+    const sessionId =
+      resolvedSessionId || (pid ? `pending-${pid}` : crypto.randomUUID());
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
