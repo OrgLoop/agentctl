@@ -4,6 +4,8 @@ import type { SessionRecord, StateManager } from "./state.js";
 export interface SessionTrackerOpts {
   adapters: Record<string, AgentAdapter>;
   pollIntervalMs?: number;
+  /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
+  isProcessAlive?: (pid: number) => boolean;
 }
 
 export class SessionTracker {
@@ -11,11 +13,13 @@ export class SessionTracker {
   private adapters: Record<string, AgentAdapter>;
   private pollIntervalMs: number;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
+  private readonly isProcessAlive: (pid: number) => boolean;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
     this.adapters = opts.adapters;
     this.pollIntervalMs = opts.pollIntervalMs ?? 5000;
+    this.isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
   }
 
   startPolling(): void {
@@ -35,10 +39,17 @@ export class SessionTracker {
   }
 
   private async poll(): Promise<void> {
+    // Collect PIDs from all adapter-returned sessions (the source of truth)
+    const adapterPidToId = new Map<number, string>();
+
     for (const [adapterName, adapter] of Object.entries(this.adapters)) {
       try {
         const sessions = await adapter.list({ all: true });
         for (const session of sessions) {
+          if (session.pid) {
+            adapterPidToId.set(session.pid, session.id);
+          }
+
           const existing = this.state.getSession(session.id);
           const record = sessionToRecord(session, adapterName);
 
@@ -57,6 +68,49 @@ export class SessionTracker {
         }
       } catch {
         // Adapter unavailable — skip
+      }
+    }
+
+    // Reap stale entries from daemon state
+    this.reapStaleEntries(adapterPidToId);
+  }
+
+  /**
+   * Clean up ghost sessions in the daemon state:
+   * - pending-* entries whose PID matches a resolved session → remove pending
+   * - Any "running"/"idle" session in state whose PID is dead → mark stopped
+   */
+  private reapStaleEntries(adapterPidToId: Map<number, string>): void {
+    const sessions = this.state.getSessions();
+
+    for (const [id, record] of Object.entries(sessions)) {
+      // Bug 2: If this is a pending-* entry and a real session has the same PID,
+      // the pending entry is stale — remove it
+      if (id.startsWith("pending-") && record.pid) {
+        const resolvedId = adapterPidToId.get(record.pid);
+        if (resolvedId && resolvedId !== id) {
+          this.state.removeSession(id);
+          continue;
+        }
+      }
+
+      // Bug 1: If session is "running"/"idle" but PID is dead, mark stopped
+      if (
+        (record.status === "running" || record.status === "idle") &&
+        record.pid
+      ) {
+        // Only reap if the adapter didn't return this session as running
+        // (adapter is the source of truth for sessions it knows about)
+        const adapterId = adapterPidToId.get(record.pid);
+        if (adapterId === id) continue; // Adapter confirmed this PID is active
+
+        if (!this.isProcessAlive(record.pid)) {
+          this.state.setSession(id, {
+            ...record,
+            status: "stopped",
+            stoppedAt: new Date().toISOString(),
+          });
+        }
       }
     }
   }
@@ -96,6 +150,9 @@ export class SessionTracker {
       );
     }
 
+    // Dedup: if a pending-* entry shares a PID with a resolved entry, show only the resolved one
+    filtered = deduplicatePendingSessions(filtered);
+
     return filtered.sort((a, b) => {
       // Running first, then by recency
       if (a.status === "running" && b.status !== "running") return -1;
@@ -120,6 +177,37 @@ export class SessionTracker {
     }
     return session;
   }
+}
+
+/** Check if a process is alive via kill(pid, 0) signal check */
+function defaultIsProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove pending-* entries that share a PID with a resolved (non-pending) session.
+ * This is a safety net for list output — the poll() reaper handles cleanup in state.
+ */
+function deduplicatePendingSessions(
+  sessions: SessionRecord[],
+): SessionRecord[] {
+  const realPids = new Set<number>();
+  for (const s of sessions) {
+    if (!s.id.startsWith("pending-") && s.pid) {
+      realPids.add(s.pid);
+    }
+  }
+  return sessions.filter((s) => {
+    if (s.id.startsWith("pending-") && s.pid && realPids.has(s.pid)) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function sessionToRecord(
