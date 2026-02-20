@@ -2,7 +2,12 @@
 
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
+
+const require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = require("../package.json");
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
@@ -186,7 +191,7 @@ const program = new Command();
 program
   .name("agentctl")
   .description("Universal agent supervision interface")
-  .version("0.3.0");
+  .version(PKG_VERSION);
 
 // list
 program
