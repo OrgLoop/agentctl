@@ -69,4 +69,15 @@ export interface LaunchOpts {
   model?: string;
   env?: Record<string, string>;
   adapterOpts?: Record<string, unknown>;
+  /** Git worktree options — auto-create worktree before launch */
+  worktree?: { repo: string; branch: string };
+  /** Lifecycle hooks — shell commands to run at various points */
+  hooks?: LifecycleHooks;
+}
+
+export interface LifecycleHooks {
+  onCreate?: string;
+  onComplete?: string;
+  preMerge?: string;
+  postMerge?: string;
 }

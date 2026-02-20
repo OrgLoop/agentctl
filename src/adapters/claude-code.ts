@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -33,7 +34,10 @@ export interface PidInfo {
 export interface LaunchedSessionMeta {
   sessionId: string;
   pid: number;
+  /** Process start time from `ps -p <pid> -o lstart=` for PID recycling detection */
   startTime?: string;
+  /** The PID of the wrapper (agentctl launch) — may differ from `pid` (Claude Code process) */
+  wrapperPid?: number;
   cwd: string;
   model?: string;
   prompt?: string;
@@ -225,10 +229,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const env = { ...process.env, ...opts.env };
     const cwd = opts.cwd || process.cwd();
 
+    // Write stdout to a log file so we can extract the session ID
+    // without keeping a pipe open (which would prevent full detachment).
+    await fs.mkdir(this.sessionsMetaDir, { recursive: true });
+    const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
+    const logFd = await fs.open(logPath, "w");
+
     const child = spawn("claude", args, {
       cwd,
       env,
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", logFd.fd, "ignore"],
       detached: true,
     });
 
@@ -239,11 +249,24 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const pid = child.pid;
     const now = new Date();
 
+    // Close our handle — child keeps its own fd open
+    await logFd.close();
+
+    // Try to extract the real Claude Code session ID from the log output.
+    // Claude Code's stream-json format emits a line with sessionId early on.
+    let resolvedSessionId: string | undefined;
+    if (pid) {
+      resolvedSessionId = await this.pollForSessionId(logPath, pid, 5000);
+    }
+
+    const sessionId = resolvedSessionId || crypto.randomUUID();
+
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
       await this.writeSessionMeta({
-        sessionId: `pending-${pid}`,
+        sessionId,
         pid,
+        wrapperPid: process.pid,
         cwd,
         model: opts.model,
         prompt: opts.prompt.slice(0, 200),
@@ -252,7 +275,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
 
     const session: AgentSession = {
-      id: `pending-${pid}`,
+      id: sessionId,
       adapter: this.id,
       status: "running",
       startedAt: now,
@@ -263,10 +286,49 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       meta: {
         adapterOpts: opts.adapterOpts,
         spec: opts.spec,
+        logPath,
       },
     };
 
     return session;
+  }
+
+  /**
+   * Poll the launch log file for up to `timeoutMs` to extract the real session ID.
+   * Claude Code's stream-json output includes sessionId in early messages.
+   */
+  private async pollForSessionId(
+    logPath: string,
+    pid: number,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const content = await fs.readFile(logPath, "utf-8");
+        for (const line of content.split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.sessionId && typeof msg.sessionId === "string") {
+              return msg.sessionId;
+            }
+          } catch {
+            // Not valid JSON yet
+          }
+        }
+      } catch {
+        // File may not exist yet
+      }
+      // Check if process is still alive
+      try {
+        process.kill(pid, 0);
+      } catch {
+        break; // Process died
+      }
+      await sleep(200);
+    }
+    return undefined;
   }
 
   async stop(sessionId: string, opts?: StopOpts): Promise<void> {
@@ -530,7 +592,24 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (meta?.pid) {
       // Verify the persisted PID is still alive
       if (this.isProcessAlive(meta.pid)) {
-        // If we have a start time, verify it's not a recycled PID
+        // Cross-check: if this PID appears in runningPids with a DIFFERENT
+        // start time than what we recorded, the PID was recycled.
+        const pidInfo = runningPids.get(meta.pid);
+        if (pidInfo?.startTime && meta.startTime) {
+          const currentStartMs = new Date(pidInfo.startTime).getTime();
+          const recordedStartMs = new Date(meta.startTime).getTime();
+          if (
+            !Number.isNaN(currentStartMs) &&
+            !Number.isNaN(recordedStartMs) &&
+            Math.abs(currentStartMs - recordedStartMs) > 5000
+          ) {
+            // Process at this PID has a different start time — recycled
+            await this.deleteSessionMeta(entry.sessionId);
+            return false;
+          }
+        }
+
+        // Verify stored start time is consistent with launch time
         if (meta.startTime) {
           const metaStartMs = new Date(meta.startTime).getTime();
           const sessionMs = new Date(meta.launchedAt).getTime();
@@ -748,15 +827,34 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   async readSessionMeta(
     sessionId: string,
   ): Promise<LaunchedSessionMeta | null> {
-    // Check both the exact sessionId and the pending-* form
-    for (const id of [sessionId, `pending-${sessionId}`]) {
-      const metaPath = path.join(this.sessionsMetaDir, `${id}.json`);
-      try {
-        const raw = await fs.readFile(metaPath, "utf-8");
-        return JSON.parse(raw) as LaunchedSessionMeta;
-      } catch {
-        // File doesn't exist or is unreadable
+    // Check exact sessionId first
+    const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
+    try {
+      const raw = await fs.readFile(metaPath, "utf-8");
+      return JSON.parse(raw) as LaunchedSessionMeta;
+    } catch {
+      // File doesn't exist or is unreadable
+    }
+
+    // Scan all metadata files for one whose sessionId matches
+    // (handles resolved session IDs that were originally pending-*)
+    try {
+      const files = await fs.readdir(this.sessionsMetaDir);
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const raw = await fs.readFile(
+            path.join(this.sessionsMetaDir, file),
+            "utf-8",
+          );
+          const meta = JSON.parse(raw) as LaunchedSessionMeta;
+          if (meta.sessionId === sessionId) return meta;
+        } catch {
+          // skip
+        }
       }
+    } catch {
+      // Dir doesn't exist
     }
     return null;
   }
