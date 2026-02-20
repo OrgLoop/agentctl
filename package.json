@@ -1,5 +1,5 @@
 {
-  "name": "agentctl",
+  "name": "@orgloop/agentctl",
   "version": "0.3.0",
   "description": "Universal agent supervision interface — monitor and control AI coding agents from a single CLI",
   "type": "module",
@@ -25,7 +25,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/c-h-/agentctl.git"
+    "url": "git+https://github.com/orgloop/agentctl.git"
   },
   "homepage": "https://github.com/c-h-/agentctl#readme",
   "bugs": {
@@ -53,5 +53,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

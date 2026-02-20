@@ -27,9 +27,13 @@ npm link
 
 # Commit and tag
 git add package.json package-lock.json
-git commit --author="Doink (OpenClaw) <charlie+doink@kindo.ai>" -m "release: $NEW_VERSION"
-git tag "$NEW_VERSION"
+git commit --author="Doink (OpenClaw) <charlie+doink@kindo.ai>" -m "release: $NEW_VERSION
+
+Co-Authored-By: Charlie Hulcher <charlie@kindo.ai>"
+git tag "v$NEW_VERSION"
+
+# Push with tag (triggers publish workflow)
+git push origin main --tags
 
 echo ""
-echo "Released $NEW_VERSION"
-echo "Run 'git push && git push --tags' to publish."
+echo "✅ Released $NEW_VERSION — publish workflow triggered."

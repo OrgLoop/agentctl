@@ -190,7 +190,7 @@ agentctl stores daemon state in `~/.agentctl/`:
 ## Development
 
 ```bash
-git clone https://github.com/c-h-/agentctl.git
+git clone https://github.com/orgloop/agentctl.git
 cd agentctl
 npm install
 npm run build
