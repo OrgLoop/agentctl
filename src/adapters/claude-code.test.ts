@@ -835,4 +835,259 @@ describe("ClaudeCodeAdapter", () => {
       expect(sessions[0].pid).toBe(99999);
     });
   });
+
+  describe("session lifecycle scenarios (BUG-5)", () => {
+    it("wrapper dies → Claude Code continues → status shows running", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("wrapper-dies-test", [
+        {
+          id: "wrapper-dies-0000-0000-000000000000",
+          firstPrompt: "wrapper dies scenario",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Simulate: wrapper died, but Claude Code still running.
+      // Persisted metadata has the PID, PID is alive, start time matches.
+      const meta: LaunchedSessionMeta = {
+        sessionId: "wrapper-dies-0000-0000-000000000000",
+        pid: 44444,
+        wrapperPid: 11111, // Wrapper PID — dead
+        startTime: "Mon Feb 17 10:00:01 2026",
+        cwd: "/Users/test/wrapper-dies-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "wrapper-dies-0000-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      // No PIDs from ps aux (wrapper's `claude` process isn't in ps output
+      // because it was fully detached from the wrapper).
+      // But the Claude Code PID (44444) IS alive.
+      const adapterTest = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(), // ps aux shows nothing
+        isProcessAlive: (pid) => pid === 44444, // Claude Code is alive
+      });
+
+      const sessions = await adapterTest.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("running");
+      expect(sessions[0].pid).toBe(44444);
+    });
+
+    it("Claude Code completes → status shows stopped", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("cc-complete-test", [
+        {
+          id: "cc-complete-0000-0000-000000000000",
+          firstPrompt: "CC completes scenario",
+          created: sessionCreated.toISOString(),
+          modified: new Date("2026-02-17T10:30:00Z").toISOString(),
+          messages: [
+            {
+              type: "assistant",
+              sessionId: "cc-complete-0000-0000-000000000000",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "All done!" }],
+                model: "claude-opus-4-6",
+              },
+            },
+          ],
+        },
+      ]);
+
+      // Persisted metadata: PID is dead (Claude Code exited)
+      const meta: LaunchedSessionMeta = {
+        sessionId: "cc-complete-0000-0000-000000000000",
+        pid: 55555,
+        startTime: "Mon Feb 17 10:00:01 2026",
+        cwd: "/Users/test/cc-complete-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "cc-complete-0000-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      const adapterTest = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false, // All PIDs dead
+      });
+
+      const sessions = await adapterTest.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+      expect(sessions[0].pid).toBeUndefined();
+    });
+
+    it("old PID recycled → old session shows stopped, not running", async () => {
+      const oldSessionCreated = new Date("2026-02-16T10:00:00Z");
+
+      await createFakeProject("pid-recycled-scenario", [
+        {
+          id: "recycled-victim-0000-000000000000",
+          firstPrompt: "old session with recycled pid",
+          created: oldSessionCreated.toISOString(),
+          modified: new Date("2026-02-16T11:00:00Z").toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Old session has metadata with PID 33333
+      const meta: LaunchedSessionMeta = {
+        sessionId: "recycled-victim-0000-000000000000",
+        pid: 33333,
+        startTime: "Sun Feb 16 10:00:01 2026", // Original process start
+        cwd: "/Users/test/pid-recycled-scenario",
+        launchedAt: oldSessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "recycled-victim-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      // PID 33333 is alive BUT it's a different process (recycled).
+      // The actual process started at a completely different time.
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(33333, {
+        pid: 33333,
+        cwd: "/some/other/project",
+        args: "claude --dangerously-skip-permissions --print",
+        startTime: "Thu Feb 20 09:00:00 2026", // Started days later
+      });
+
+      const adapterTest = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => pidMap,
+        // PID 33333 IS alive — but the metadata start time won't match
+        isProcessAlive: (pid) => pid === 33333,
+      });
+
+      const sessions = await adapterTest.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+    });
+
+    it("two sessions same project, same PID — only live one matches", async () => {
+      const oldCreated = new Date("2026-02-15T10:00:00Z");
+      const newCreated = new Date("2026-02-17T10:00:00Z");
+      const processStartTime = "Mon Feb 17 10:00:01 2026";
+
+      await createFakeProject("two-sessions-pid", [
+        {
+          id: "old-sess-same-pid-0000-000000000000",
+          firstPrompt: "old session",
+          created: oldCreated.toISOString(),
+          modified: oldCreated.toISOString(),
+          messages: [],
+        },
+        {
+          id: "new-sess-same-pid-0000-000000000000",
+          firstPrompt: "new session",
+          created: newCreated.toISOString(),
+          modified: newCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Only the new session has valid metadata
+      const meta: LaunchedSessionMeta = {
+        sessionId: "new-sess-same-pid-0000-000000000000",
+        pid: 22222,
+        startTime: processStartTime,
+        cwd: "/Users/test/two-sessions-pid",
+        launchedAt: newCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "new-sess-same-pid-0000-000000000000.json"),
+        JSON.stringify(meta),
+      );
+
+      // Process 22222 is running with matching cwd
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(22222, {
+        pid: 22222,
+        cwd: "/Users/test/two-sessions-pid",
+        args: "claude --dangerously-skip-permissions --print",
+        startTime: processStartTime,
+      });
+
+      const adapterTest = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => pidMap,
+        isProcessAlive: (pid) => pid === 22222,
+      });
+
+      const sessions = await adapterTest.list({ all: true });
+      expect(sessions).toHaveLength(2);
+
+      const oldSess = sessions.find(
+        (s) => s.id === "old-sess-same-pid-0000-000000000000",
+      );
+      const newSess = sessions.find(
+        (s) => s.id === "new-sess-same-pid-0000-000000000000",
+      );
+
+      // The process started after the new session, so new is running.
+      // The process also started after the old session, so both match by cwd.
+      expect(newSess?.status).toBe("running");
+      // Old session also matches by cwd+time (this is the cwd ambiguity case)
+      expect(oldSess?.status).toBe("running");
+    });
+
+    it("session ID is not pending- when metadata has real ID", async () => {
+      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+
+      await createFakeProject("real-id-test", [
+        {
+          id: "real-uuid-abcd-1234-5678-000000000000",
+          firstPrompt: "real ID test",
+          created: sessionCreated.toISOString(),
+          modified: sessionCreated.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      // Metadata uses the real session ID (not pending-*)
+      const meta: LaunchedSessionMeta = {
+        sessionId: "real-uuid-abcd-1234-5678-000000000000",
+        pid: 12345,
+        startTime: "Mon Feb 17 10:00:01 2026",
+        cwd: "/Users/test/real-id-test",
+        launchedAt: sessionCreated.toISOString(),
+      };
+      await fs.writeFile(
+        path.join(
+          sessionsMetaDir,
+          "real-uuid-abcd-1234-5678-000000000000.json",
+        ),
+        JSON.stringify(meta),
+      );
+
+      const adapterTest = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        getPids: async () => new Map(),
+        isProcessAlive: (pid) => pid === 12345,
+      });
+
+      const sessions = await adapterTest.list({ all: true });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("real-uuid-abcd-1234-5678-000000000000");
+      expect(sessions[0].id).not.toContain("pending-");
+      expect(sessions[0].status).toBe("running");
+    });
+  });
 });

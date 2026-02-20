@@ -9,9 +9,17 @@ import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
 import { DaemonClient } from "./client/daemon-client.js";
-import type { AgentAdapter, AgentSession, ListOpts } from "./core/types.js";
+import type {
+  AgentAdapter,
+  AgentSession,
+  LifecycleHooks,
+  ListOpts,
+} from "./core/types.js";
 import type { DaemonStatus } from "./daemon/server.js";
 import type { FuseTimer, Lock, SessionRecord } from "./daemon/state.js";
+import { runHook } from "./hooks.js";
+import { mergeSession } from "./merge.js";
+import { createWorktree, type WorktreeInfo } from "./worktree.js";
 
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
@@ -35,7 +43,7 @@ async function ensureDaemon(): Promise<boolean> {
 
     const child = spawn(
       process.execPath,
-      [__filename, "daemon", "start", "--foreground"],
+      [__filename, "daemon", "start", "--supervised"],
       {
         detached: true,
         stdio: [
@@ -388,9 +396,50 @@ program
   .option("--cwd <dir>", "Working directory")
   .option("--model <model>", "Model to use (e.g. sonnet, opus)")
   .option("--force", "Override directory locks")
+  .option(
+    "--worktree <repo>",
+    "Auto-create git worktree from this repo before launch",
+  )
+  .option("--branch <name>", "Branch name for --worktree")
+  .option("--on-create <script>", "Hook: run after session is created")
+  .option("--on-complete <script>", "Hook: run after session completes")
+  .option("--pre-merge <script>", "Hook: run before merge")
+  .option("--post-merge <script>", "Hook: run after merge")
   .action(async (adapterName: string | undefined, opts) => {
-    const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+    let cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
     const name = adapterName || "claude-code";
+
+    // FEAT-1: Worktree lifecycle
+    let worktreeInfo: WorktreeInfo | undefined;
+    if (opts.worktree) {
+      if (!opts.branch) {
+        console.error("--branch is required when using --worktree");
+        process.exit(1);
+      }
+      try {
+        worktreeInfo = await createWorktree({
+          repo: opts.worktree,
+          branch: opts.branch,
+        });
+        cwd = worktreeInfo.path;
+        console.log(`Worktree created: ${worktreeInfo.path}`);
+      } catch (err) {
+        console.error(`Failed to create worktree: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
+
+    // Collect hooks
+    const hooks: LifecycleHooks | undefined =
+      opts.onCreate || opts.onComplete || opts.preMerge || opts.postMerge
+        ? {
+            onCreate: opts.onCreate,
+            onComplete: opts.onComplete,
+            preMerge: opts.preMerge,
+            postMerge: opts.postMerge,
+          }
+        : undefined;
+
     const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
@@ -402,10 +451,25 @@ program
           spec: opts.spec,
           model: opts.model,
           force: opts.force,
+          worktree: worktreeInfo
+            ? { repo: worktreeInfo.repo, branch: worktreeInfo.branch }
+            : undefined,
+          hooks,
         });
         console.log(
           `Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`,
         );
+
+        // Run onCreate hook
+        if (hooks?.onCreate) {
+          await runHook(hooks, "onCreate", {
+            sessionId: session.id,
+            cwd,
+            adapter: name,
+            branch: opts.branch,
+          });
+        }
+
         return;
       } catch (err) {
         console.error((err as Error).message);
@@ -425,12 +489,23 @@ program
         adapter: name,
         prompt: opts.prompt,
         spec: opts.spec,
-        cwd: opts.cwd,
+        cwd,
         model: opts.model,
+        hooks,
       });
       console.log(
         `Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`,
       );
+
+      // Run onCreate hook
+      if (hooks?.onCreate) {
+        await runHook(hooks, "onCreate", {
+          sessionId: session.id,
+          cwd,
+          adapter: name,
+          branch: opts.branch,
+        });
+      }
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
@@ -454,6 +529,91 @@ program
         meta: event.meta,
       };
       console.log(JSON.stringify(out));
+    }
+  });
+
+// --- Merge command (FEAT-4) ---
+
+program
+  .command("merge <id>")
+  .description("Commit, push, and open PR for a session's work")
+  .option("-m, --message <text>", "Commit message")
+  .option("--remove-worktree", "Remove worktree after merge")
+  .option("--repo <path>", "Main repo path (for worktree removal)")
+  .option("--pre-merge <script>", "Hook: run before merge")
+  .option("--post-merge <script>", "Hook: run after merge")
+  .action(async (id: string, opts) => {
+    // Find session
+    const daemonRunning = await ensureDaemon();
+    let sessionCwd: string | undefined;
+    let sessionAdapter: string | undefined;
+
+    if (daemonRunning) {
+      try {
+        const session = await client.call<SessionRecord>("session.status", {
+          id,
+        });
+        sessionCwd = session.cwd;
+        sessionAdapter = session.adapter;
+      } catch {
+        // Fall through to adapter
+      }
+    }
+
+    if (!sessionCwd) {
+      const adapter = getAdapter();
+      try {
+        const session = await adapter.status(id);
+        sessionCwd = session.cwd;
+        sessionAdapter = session.adapter;
+      } catch (err) {
+        console.error(`Session not found: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
+
+    if (!sessionCwd) {
+      console.error("Cannot determine session working directory");
+      process.exit(1);
+    }
+
+    const hooks: LifecycleHooks | undefined =
+      opts.preMerge || opts.postMerge
+        ? { preMerge: opts.preMerge, postMerge: opts.postMerge }
+        : undefined;
+
+    // Pre-merge hook
+    if (hooks?.preMerge) {
+      await runHook(hooks, "preMerge", {
+        sessionId: id,
+        cwd: sessionCwd,
+        adapter: sessionAdapter || "claude-code",
+      });
+    }
+
+    const result = await mergeSession({
+      cwd: sessionCwd,
+      message: opts.message,
+      removeWorktree: opts.removeWorktree,
+      repoPath: opts.repo,
+    });
+
+    if (result.committed) console.log("Changes committed");
+    if (result.pushed) console.log("Pushed to remote");
+    if (result.prUrl) console.log(`PR: ${result.prUrl}`);
+    if (result.worktreeRemoved) console.log("Worktree removed");
+
+    if (!result.committed && !result.pushed) {
+      console.log("No changes to commit or push");
+    }
+
+    // Post-merge hook
+    if (hooks?.postMerge) {
+      await runHook(hooks, "postMerge", {
+        sessionId: id,
+        cwd: sessionCwd,
+        adapter: sessionAdapter || "claude-code",
+      });
     }
   });
 
@@ -565,48 +725,73 @@ daemonCmd
   .command("start")
   .description("Start the daemon")
   .option("--foreground", "Run in foreground (don't daemonize)")
+  .option("--supervised", "Run under supervisor (auto-restart on crash)")
   .option("--metrics-port <port>", "Prometheus metrics port", "9200")
   .action(async (opts) => {
-    if (!opts.foreground) {
-      const __filename = fileURLToPath(import.meta.url);
-      const logDir = path.join(os.homedir(), ".agentctl");
-      await fs.mkdir(logDir, { recursive: true });
-
-      const child = spawn(
-        process.execPath,
-        [
-          __filename,
-          "daemon",
-          "start",
-          "--foreground",
-          "--metrics-port",
-          opts.metricsPort,
-        ],
-        {
-          detached: true,
-          stdio: [
-            "ignore",
-            (await fs.open(path.join(logDir, "daemon.stdout.log"), "a")).fd,
-            (await fs.open(path.join(logDir, "daemon.stderr.log"), "a")).fd,
-          ],
-        },
-      );
-      child.unref();
-      console.log(`Daemon started (PID ${child.pid})`);
+    if (opts.foreground) {
+      // Foreground mode — import and start directly
+      const { startDaemon } = await import("./daemon/server.js");
+      await startDaemon({
+        metricsPort: Number(opts.metricsPort),
+      });
       return;
     }
 
-    // Foreground mode — import and start
-    const { startDaemon } = await import("./daemon/server.js");
-    await startDaemon({
-      metricsPort: Number(opts.metricsPort),
-    });
+    if (opts.supervised) {
+      // Supervised mode — run supervisor loop in foreground (launched detached)
+      const { runSupervisor } = await import("./daemon/supervisor.js");
+      const __filename = fileURLToPath(import.meta.url);
+      await runSupervisor({
+        nodePath: process.execPath,
+        cliPath: __filename,
+        metricsPort: Number(opts.metricsPort),
+        configDir: path.join(os.homedir(), ".agentctl"),
+      });
+      return;
+    }
+
+    // Default: launch supervisor in background (detached)
+    const __filename = fileURLToPath(import.meta.url);
+    const logDir = path.join(os.homedir(), ".agentctl");
+    await fs.mkdir(logDir, { recursive: true });
+
+    const child = spawn(
+      process.execPath,
+      [
+        __filename,
+        "daemon",
+        "start",
+        "--supervised",
+        "--metrics-port",
+        opts.metricsPort,
+      ],
+      {
+        detached: true,
+        stdio: [
+          "ignore",
+          (await fs.open(path.join(logDir, "daemon.stdout.log"), "a")).fd,
+          (await fs.open(path.join(logDir, "daemon.stderr.log"), "a")).fd,
+        ],
+      },
+    );
+    child.unref();
+    console.log(`Daemon started with supervisor (PID ${child.pid})`);
   });
 
 daemonCmd
   .command("stop")
   .description("Stop the daemon")
   .action(async () => {
+    // Stop supervisor first (prevents auto-restart)
+    const { getSupervisorPid } = await import("./daemon/supervisor.js");
+    const supPid = await getSupervisorPid();
+    if (supPid) {
+      try {
+        process.kill(supPid, "SIGTERM");
+      } catch {
+        // Already gone
+      }
+    }
     try {
       await client.call("daemon.shutdown");
       console.log("Daemon stopped");
@@ -641,15 +826,25 @@ daemonCmd
     } catch {
       // Daemon wasn't running — that's fine
     }
-    // Wait for old daemon to exit
+    // Also kill supervisor if running
+    const { getSupervisorPid } = await import("./daemon/supervisor.js");
+    const supPid = await getSupervisorPid();
+    if (supPid) {
+      try {
+        process.kill(supPid, "SIGTERM");
+      } catch {
+        // Already gone
+      }
+    }
+    // Wait for old processes to exit
     await new Promise((r) => setTimeout(r, 500));
-    // Start new daemon
+    // Start new daemon with supervisor
     const __filename = fileURLToPath(import.meta.url);
     const logDir = path.join(os.homedir(), ".agentctl");
     await fs.mkdir(logDir, { recursive: true });
     const child = spawn(
       process.execPath,
-      [__filename, "daemon", "start", "--foreground"],
+      [__filename, "daemon", "start", "--supervised"],
       {
         detached: true,
         stdio: [
@@ -660,7 +855,7 @@ daemonCmd
       },
     );
     child.unref();
-    console.log(`Daemon restarted (PID ${child.pid})`);
+    console.log(`Daemon restarted with supervisor (PID ${child.pid})`);
   });
 
 daemonCmd
