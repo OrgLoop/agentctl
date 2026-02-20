@@ -1,17 +1,17 @@
-# agent-ctl v2 — Universal Agent Supervision Interface
+# agentctl — Universal Agent Supervision Interface
 
-**Status:** 🟢 Phase 1 Complete
+**Status:** 🟢 Phase 1 Complete, v0.3.0 preparing for public release
 **Author:** Charlie Hulcher + Jarvis
 **Date:** 2026-02-16
-**Repos:** `~/personal/agent-ctl` (new), `~/personal/orgloop`, `~/personal/arc`
+**Repos:** `~/personal/agentctl-publish`, `~/personal/orgloop`, `~/personal/arc`
 
 ---
 
 ## Vision
 
-agent-ctl is a universal read/control interface for AI agent sessions. It reads from native sources (never replicates state), provides a standard CLI for humans and agents to list/peek/stop/launch sessions, and emits lifecycle events that OrgLoop routes to mechanical reactions.
+agentctl is a universal read/control interface for AI agent sessions. It reads from native sources (never replicates state), provides a standard CLI for humans and agents to list/peek/stop/launch sessions, and emits lifecycle events that OrgLoop routes to mechanical reactions.
 
-**agent-ctl does NOT:**
+**agentctl does NOT:**
 - Maintain its own session registry (reads native sources)
 - Have a hook/reaction system (that's OrgLoop)
 - Make judgment calls about what to do (that's OpenClaw)
@@ -19,21 +19,21 @@ agent-ctl is a universal read/control interface for AI agent sessions. It reads 
 **Layer model:**
 | Layer | Role |
 |-------|------|
-| agent-ctl | Universal read/control. Emits lifecycle events. |
+| agentctl | Universal read/control. Emits lifecycle events. |
 | OrgLoop | Routes lifecycle events to mechanical reactions (cluster fuse, notifications). |
 | OpenClaw | Reasoning/supervision. Makes judgment calls. |
 
 ---
 
-## Phase 1: agent-ctl Core + Claude Code Adapter
+## Phase 1: agentctl Core + Claude Code Adapter
 
 ### 1.1 Repo Setup
 
-- Create `~/personal/agent-ctl/` as TypeScript project
-- GitHub: `gh-me repo create agent-ctl --private`
+- TypeScript project, ESM-only
+- GitHub: `c-h-/agentctl` (was `agent-ctl`, renamed)
 - Runtime: Node.js + TypeScript (Bun-compatible)
-- Package name: `agent-ctl` (for eventual npm publish)
-- Binary: `agent-ctl` via package.json `bin`
+- Package name: `agentctl` (npm)
+- Binary: `agentctl` (primary), `agent-ctl` (compat alias)
 
 ### 1.2 Adapter Interface
 
@@ -137,40 +137,40 @@ interface LaunchOpts {
 
 ```bash
 # List all sessions across all adapters
-agent-ctl list
-agent-ctl list --adapter claude-code
-agent-ctl list --status running
-agent-ctl list -a  # Include stopped/completed (last 7 days)
+agentctl list
+agentctl list --adapter claude-code
+agentctl list --status running
+agentctl list -a  # Include stopped/completed (last 7 days)
 
 # Session details
-agent-ctl status <id>
-agent-ctl peek <id> [-n 50]
+agentctl status <id>
+agentctl peek <id> [-n 50]
 
 # Control
-agent-ctl stop <id>
-agent-ctl stop <id> --force
-agent-ctl resume <id> "fix the failing tests"
+agentctl stop <id>
+agentctl stop <id> --force
+agentctl resume <id> "fix the failing tests"
 
 # Launch (replaces claude-supervised)
-agent-ctl launch claude-code \
+agentctl launch claude-code \
   -p "Read the spec. Implement phase 2." \
   --spec docs/spec.md \
   --cwd ~/personal/my-project \
   --model sonnet
 
 # Event stream (for debugging / piping to OrgLoop)
-agent-ctl events --json
+agentctl events --json
 ```
 
 **Output format:** Human-friendly table by default, `--json` for machine consumption.
 
 ### 1.5 Acceptance Criteria — Phase 1
 
-- [x] `agent-ctl list` shows only real, live Claude Code sessions (no stale ghosts)
-- [x] `agent-ctl peek <id>` shows recent output from a running session
-- [x] `agent-ctl stop <id>` gracefully stops a running session
-- [x] `agent-ctl launch claude-code -p "hello"` starts a session (replaces claude-supervised)
-- [x] `agent-ctl events --json` emits lifecycle events as NDJSON
+- [x] `agentctl list` shows only real, live Claude Code sessions (no stale ghosts)
+- [x] `agentctl peek <id>` shows recent output from a running session
+- [x] `agentctl stop <id>` gracefully stops a running session
+- [x] `agentctl launch claude-code -p "hello"` starts a session (replaces claude-supervised)
+- [x] `agentctl events --json` emits lifecycle events as NDJSON
 - [x] Zero file-based registry — all state from native sources
 - [x] Tests: unit tests for adapter (14 tests passing)
 - [ ] Integration test launching+stopping a real session (deferred to Phase 2)
@@ -180,20 +180,20 @@ agent-ctl events --json
 ## Phase 2: Cut Over
 
 ### 2.1 Update Dependents
-- Update `~/.openclaw/workspaces/personal/TOOLS.md` — document new `agent-ctl launch` syntax
+- Update `~/.openclaw/workspaces/personal/TOOLS.md` — document new `agentctl launch` syntax
 - Update `~/.openclaw/workspaces/personal/CLAUDE_CODE_SOP.md` — replace `claude-supervised` references
-- Update `~/personal/arc/daemon/src/adapters/` — swap to new agent-ctl interface
-- Symlink or install `agent-ctl` binary globally (`npm link` or PATH addition)
+- Update `~/personal/arc/daemon/src/adapters/` — swap to new agentctl interface
+- Symlink or install `agentctl` binary globally (`npm link` or PATH addition)
 
 ### 2.2 Delete Old Artifacts
-- `~/.openclaw/scripts/agent-ctl/` (old implementation)
-- `~/.local/bin/claude-supervised` (absorbed into agent-ctl)
-- `~/.openclaw/scripts/agent-ctl/sessions/` (stale file registry)
+- `~/.openclaw/scripts/agentctl/` (old implementation)
+- `~/.local/bin/claude-supervised` (absorbed into agentctl)
+- `~/.openclaw/scripts/agentctl/sessions/` (stale file registry)
 - `~/.local/bin/notify-doink.sh` or wherever the stop hook lives
 - Any Claude Code Stop hook that calls notify-doink
 
 ### 2.3 Acceptance Criteria — Phase 2
-- [ ] `claude-supervised` no longer exists; `agent-ctl launch` is the only way
+- [ ] `claude-supervised` no longer exists; `agentctl launch` is the only way
 - [ ] ARC dashboard shows live, accurate session data
 - [ ] OpenClaw workspace docs reference new commands
 - [ ] No stale session files anywhere on disk
@@ -202,18 +202,18 @@ agent-ctl events --json
 
 ## Phase 3: OrgLoop Connectors
 
-### 3.1 `@orgloop/connector-agent-ctl` (Source)
+### 3.1 `@orgloop/connector-agentctl` (Source)
 
-Reads lifecycle events from agent-ctl and emits them as OrgLoop events.
+Reads lifecycle events from agentctl and emits them as OrgLoop events.
 
 ```typescript
-// connector-agent-ctl/src/index.ts
+// connector-agentctl/src/index.ts
 export default class AgentCtlConnector implements SourceConnector {
-  // Runs `agent-ctl events --json` and pipes lifecycle events into OrgLoop
-  // Or: polls `agent-ctl list --json` on interval (simpler, good enough)
+  // Runs `agentctl events --json` and pipes lifecycle events into OrgLoop
+  // Or: polls `agentctl list --json` on interval (simpler, good enough)
   
   async poll(): Promise<OrgLoopEvent[]> {
-    const sessions = await exec('agent-ctl list --json');
+    const sessions = await exec('agentctl list --json');
     // Diff against last poll, emit started/stopped events
   }
 }
@@ -252,7 +252,7 @@ export default class DockerConnector implements ActorConnector {
 # In orgloop.yaml
 sources:
   - id: agents
-    connector: "@orgloop/connector-agent-ctl"
+    connector: "@orgloop/connector-agentctl"
     poll: { interval: 30s }
 
 actors:
@@ -293,7 +293,7 @@ routes:
 ```
 
 ### 3.5 Acceptance Criteria — Phase 3
-- [ ] `@orgloop/connector-agent-ctl` published and working in OrgLoop pipeline
+- [ ] `@orgloop/connector-agentctl` published and working in OrgLoop pipeline
 - [ ] `@orgloop/connector-docker` published and working
 - [ ] Kind cluster fuse works via OrgLoop route (replaces bespoke bash script)
 - [ ] Session completion notifications flow through OrgLoop → OpenClaw
@@ -314,25 +314,25 @@ routes:
 - Gas Town actors (once OrgLoop actors have session-like lifecycle)
 
 ### 4.3 ARC Simplification
-- ARC's multiple adapters (agent-ctl, openclaw, github, git, system) consolidate
-- agent-ctl becomes the single source for all agent data
+- ARC's multiple adapters (agentctl, openclaw, github, git, system) consolidate
+- agentctl becomes the single source for all agent data
 - ARC keeps system/github/git adapters (those aren't agents)
 
 ---
 
 ## Build Plan — Claude Code Teams
 
-### Team 1: agent-ctl core + Claude Code adapter
-- **Repo:** `~/personal/agent-ctl`
+### Team 1: agentctl core + Claude Code adapter
+- **Repo:** `~/personal/agentctl`
 - **Scope:** Phase 1 entirely — scaffold, adapter interface, Claude Code adapter, CLI, tests
 - **Isolation:** Can build and test completely standalone
 - **Depends on:** Nothing
 
-### Team 2: OrgLoop connector-agent-ctl
+### Team 2: OrgLoop connector-agentctl
 - **Repo:** `~/personal/orgloop` (new package in monorepo)
-- **Scope:** Phase 3.1 — source connector that reads from agent-ctl
-- **Isolation:** Can build with mock agent-ctl output, test against real agent-ctl once Team 1 ships
-- **Depends on:** agent-ctl CLI interface (Team 1 must define JSON output format first)
+- **Scope:** Phase 3.1 — source connector that reads from agentctl
+- **Isolation:** Can build with mock agentctl output, test against real agentctl once Team 1 ships
+- **Depends on:** agentctl CLI interface (Team 1 must define JSON output format first)
 
 ### Team 3: OrgLoop connector-docker
 - **Repo:** `~/personal/orgloop` (new package in monorepo)
@@ -341,7 +341,7 @@ routes:
 - **Depends on:** Nothing (OrgLoop actor interface already defined)
 
 ### Integration (after all teams complete):
-- Wire agent-ctl into ARC (Phase 4.3)
+- Wire agentctl into ARC (Phase 4.3)
 - Cut over from old scripts (Phase 2)
 - Wire OrgLoop routes for cluster fuse + notifications (Phase 3.3-3.4)
 - **This is done manually/supervised, not by Claude Code teams**
@@ -352,9 +352,9 @@ routes:
 
 | Question | Decision |
 |----------|----------|
-| Where does supervision loop live? | OpenClaw. agent-ctl is mechanical only. |
-| Hook execution model? | No hooks in agent-ctl. OrgLoop handles reactions. |
-| agent-ctl repo location? | Own private repo, pathway to open source npm. |
+| Where does supervision loop live? | OpenClaw. agentctl is mechanical only. |
+| Hook execution model? | No hooks in agentctl. OrgLoop handles reactions. |
+| agentctl repo location? | Own private repo, pathway to open source npm. |
 | Kind cluster fuse? | OrgLoop route via connector-docker, not bespoke script. |
 
 ---
