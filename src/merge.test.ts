@@ -10,23 +10,35 @@ const execFileAsync = promisify(execFile);
 
 let tmpDir: string;
 let repoDir: string;
+let gitEnv: Record<string, string>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-merge-test-"));
   repoDir = path.join(tmpDir, "repo");
   await fs.mkdir(repoDir, { recursive: true });
 
+  // Prevent git from discovering parent repos (critical during pre-push hooks)
+  gitEnv = { ...process.env, GIT_CEILING_DIRECTORIES: tmpDir } as Record<
+    string,
+    string
+  >;
+
   // Initialize a git repo with a commit
-  await execFileAsync("git", ["init"], { cwd: repoDir });
+  await execFileAsync("git", ["init"], { cwd: repoDir, env: gitEnv });
   await execFileAsync("git", ["config", "user.email", "test@test.com"], {
     cwd: repoDir,
+    env: gitEnv,
   });
   await execFileAsync("git", ["config", "user.name", "Test"], {
     cwd: repoDir,
+    env: gitEnv,
   });
   await fs.writeFile(path.join(repoDir, "README.md"), "# Test");
-  await execFileAsync("git", ["add", "."], { cwd: repoDir });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoDir });
+  await execFileAsync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
+  await execFileAsync("git", ["commit", "-m", "initial"], {
+    cwd: repoDir,
+    env: gitEnv,
+  });
 });
 
 afterEach(async () => {
@@ -45,6 +57,7 @@ describe("mergeSession", () => {
     // Verify the commit was made
     const { stdout } = await execFileAsync("git", ["log", "--oneline", "-1"], {
       cwd: repoDir,
+      env: gitEnv,
     });
     expect(stdout).toContain("agentctl merge");
   });
@@ -61,6 +74,7 @@ describe("mergeSession", () => {
 
     const { stdout } = await execFileAsync("git", ["log", "--oneline", "-1"], {
       cwd: repoDir,
+      env: gitEnv,
     });
     expect(stdout).toContain("custom message");
   });

@@ -10,23 +10,35 @@ const execFileAsync = promisify(execFile);
 
 let tmpDir: string;
 let repoDir: string;
+let gitEnv: Record<string, string>;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-wt-test-"));
   repoDir = path.join(tmpDir, "repo");
   await fs.mkdir(repoDir, { recursive: true });
 
+  // Prevent git from discovering parent repos (critical during pre-push hooks)
+  gitEnv = { ...process.env, GIT_CEILING_DIRECTORIES: tmpDir } as Record<
+    string,
+    string
+  >;
+
   // Initialize a git repo with a commit
-  await execFileAsync("git", ["init"], { cwd: repoDir });
+  await execFileAsync("git", ["init"], { cwd: repoDir, env: gitEnv });
   await execFileAsync("git", ["config", "user.email", "test@test.com"], {
     cwd: repoDir,
+    env: gitEnv,
   });
   await execFileAsync("git", ["config", "user.name", "Test"], {
     cwd: repoDir,
+    env: gitEnv,
   });
   await fs.writeFile(path.join(repoDir, "README.md"), "# Test repo");
-  await execFileAsync("git", ["add", "."], { cwd: repoDir });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoDir });
+  await execFileAsync("git", ["add", "."], { cwd: repoDir, env: gitEnv });
+  await execFileAsync("git", ["commit", "-m", "initial"], {
+    cwd: repoDir,
+    env: gitEnv,
+  });
 });
 
 afterEach(async () => {
@@ -35,7 +47,7 @@ afterEach(async () => {
     const { stdout } = await execFileAsync(
       "git",
       ["worktree", "list", "--porcelain"],
-      { cwd: repoDir },
+      { cwd: repoDir, env: gitEnv },
     );
     for (const line of stdout.split("\n")) {
       if (line.startsWith("worktree ") && !line.includes(repoDir)) {
@@ -44,7 +56,7 @@ afterEach(async () => {
           await execFileAsync(
             "git",
             ["worktree", "remove", "--force", wtPath],
-            { cwd: repoDir },
+            { cwd: repoDir, env: gitEnv },
           );
         } catch {
           // best effort
@@ -76,7 +88,7 @@ describe("createWorktree", () => {
     const { stdout } = await execFileAsync(
       "git",
       ["rev-parse", "--abbrev-ref", "HEAD"],
-      { cwd: result.path },
+      { cwd: result.path, env: gitEnv },
     );
     expect(stdout.trim()).toBe("feature/test-branch");
   });
