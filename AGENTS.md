@@ -45,8 +45,6 @@ npm run lint:fix   # biome check --write
 
 ## Git
 
-- **Identity:** `git commit --author="Doink (OpenClaw) <charlie+doink@kindo.ai>"`
-- **Co-author:** `Co-Authored-By: Charlie Hulcher <charlie@kindo.ai>`
 - **Branch protection:** main requires PR review (do not push directly)
 - **Pre-push hook:** runs build + test before push
 

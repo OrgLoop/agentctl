@@ -23,6 +23,8 @@ You can use `claude code` (or any agent CLI) directly — agentctl is not a repl
 
 What it adds: session discovery across all running Claude Code instances, lifecycle tracking that persists session info even after processes exit, a daemon with directory locks to prevent duplicate launches on the same working directory, fuse timers for automated resource cleanup, and a standard interface that works the same regardless of which coding agent is underneath. The adapter model means support for additional agent runtimes (Codex, Aider, etc.) can be added without changing the CLI or daemon interface.
 
+Over time, agentctl can extend to handle more concerns of headless coding — automating worktree bootstrap/teardown, running N parallel implementations across different adapters and models and judging who did it best, and other patterns that emerge as AI-assisted development matures.
+
 ## Installation
 
 ```bash
