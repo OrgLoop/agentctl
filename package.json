@@ -1,6 +1,6 @@
 {
   "name": "@orgloop/agentctl",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Universal agent supervision interface — monitor and control AI coding agents from a single CLI",
   "type": "module",
   "bin": {
