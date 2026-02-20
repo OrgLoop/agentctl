@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 export interface WorktreeCreateOpts {
-  /** Path to the main repo (e.g. ~/code/mono) */
+  /** Path to the main repo (e.g. ~/code/myproject) */
   repo: string;
   /** Branch name (e.g. charlie/feature-name) */
   branch: string;
