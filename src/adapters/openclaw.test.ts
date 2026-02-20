@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildConnectParams,
   OpenClawAdapter,
   type RpcCallFn,
   type SessionsListResult,
@@ -9,6 +10,10 @@ import {
 const now = Date.now();
 const fiveMinAgo = now - 5 * 60 * 1000 + 30_000; // just under 5 min ago — "running"
 const hourAgo = now - 60 * 60 * 1000; // 1 hour ago — "idle"
+
+// Save and clear env vars that affect adapter construction
+const ENV_KEYS = ["OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_WEBHOOK_TOKEN"] as const;
+let savedEnv: Record<string, string | undefined>;
 
 function makeListResult(
   sessions: SessionsListResult["sessions"] = [],
@@ -45,6 +50,24 @@ function makeMockRpc(
 // --- Tests ---
 
 describe("OpenClawAdapter", () => {
+  beforeEach(() => {
+    savedEnv = {};
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] !== undefined) {
+        process.env[key] = savedEnv[key];
+      } else {
+        delete process.env[key];
+      }
+    }
+  });
+
   it("has correct id", () => {
     const adapter = new OpenClawAdapter({ rpcCall: makeMockRpc({}) });
     expect(adapter.id).toBe("openclaw");
@@ -60,7 +83,7 @@ describe("OpenClawAdapter", () => {
       const sessions = await adapter.list();
       expect(sessions).toEqual([]);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("OPENCLAW_WEBHOOK_TOKEN is not set"),
+        expect.stringContaining("OPENCLAW_GATEWAY_TOKEN is not set"),
       );
       warnSpy.mockRestore();
     });
@@ -92,7 +115,7 @@ describe("OpenClawAdapter", () => {
       const sessions = await adapter.list();
       expect(sessions).toEqual([]);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("authentication failed"),
+        expect.stringContaining("OPENCLAW_GATEWAY_TOKEN"),
       );
       warnSpy.mockRestore();
     });
@@ -374,7 +397,7 @@ describe("OpenClawAdapter", () => {
         rpcCall: makeMockRpc({}),
       });
       await expect(adapter.status("some-id")).rejects.toThrow(
-        "OPENCLAW_WEBHOOK_TOKEN is not set",
+        "OPENCLAW_GATEWAY_TOKEN is not set",
       );
     });
 
@@ -439,6 +462,74 @@ describe("OpenClawAdapter", () => {
 
       const session = await adapter.status("abcdef12");
       expect(session.id).toBe("abcdef12-9999-9999-9999-999999999999");
+    });
+  });
+
+  describe("buildConnectParams()", () => {
+    it("uses correct client.id and protocol version", () => {
+      const params = buildConnectParams("test-token");
+      expect(params.client.id).toBe("cli");
+      expect(params.maxProtocol).toBe(3);
+      expect(params.minProtocol).toBe(1);
+      expect(params.role).toBe("operator");
+      expect(params.scopes).toEqual(["operator.read"]);
+    });
+
+    it("passes auth token", () => {
+      const params = buildConnectParams("my-secret-token");
+      expect(params.auth.token).toBe("my-secret-token");
+    });
+
+    it("passes null when token is empty", () => {
+      const params = buildConnectParams("");
+      expect(params.auth.token).toBeNull();
+    });
+
+    it("includes platform and version", () => {
+      const params = buildConnectParams("tok");
+      expect(params.client.platform).toBe(process.platform);
+      expect(params.client.version).toBeTruthy();
+      expect(params.client.mode).toBe("cli");
+    });
+  });
+
+  describe("auth token resolution", () => {
+    it("prefers OPENCLAW_GATEWAY_TOKEN over OPENCLAW_WEBHOOK_TOKEN", () => {
+      process.env.OPENCLAW_GATEWAY_TOKEN = "gateway-token";
+      process.env.OPENCLAW_WEBHOOK_TOKEN = "webhook-token";
+      const adapter = new OpenClawAdapter({ rpcCall: makeMockRpc({}) });
+      // Verify via list() — if token is set, it won't warn
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      adapter.list();
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("is not set"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("falls back to OPENCLAW_WEBHOOK_TOKEN", () => {
+      process.env.OPENCLAW_WEBHOOK_TOKEN = "webhook-token";
+      const adapter = new OpenClawAdapter({ rpcCall: makeMockRpc({}) });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      adapter.list();
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("is not set"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("explicit authToken takes priority over env vars", () => {
+      process.env.OPENCLAW_GATEWAY_TOKEN = "env-token";
+      const adapter = new OpenClawAdapter({
+        authToken: "explicit-token",
+        rpcCall: makeMockRpc({}),
+      });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      adapter.list();
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining("is not set"),
+      );
+      warnSpy.mockRestore();
     });
   });
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import type {
   AgentAdapter,
   AgentSession,
@@ -11,9 +12,14 @@ import type {
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:18789";
 
+const _require = createRequire(import.meta.url);
+const PKG_VERSION: string = (
+  _require("../../package.json") as { version: string }
+).version;
+
 export interface OpenClawAdapterOpts {
   baseUrl?: string; // Default: http://127.0.0.1:18789
-  authToken?: string; // Default: process.env.OPENCLAW_WEBHOOK_TOKEN
+  authToken?: string; // Default: process.env.OPENCLAW_GATEWAY_TOKEN ?? process.env.OPENCLAW_WEBHOOK_TOKEN
   /** Override for testing — replaces the real WebSocket RPC call */
   rpcCall?: RpcCallFn;
 }
@@ -72,6 +78,26 @@ export interface SessionsPreviewResult {
 }
 
 /**
+ * Build the `connect` handshake params sent to the gateway after the
+ * challenge event. Exported so tests can verify the protocol constants.
+ */
+export function buildConnectParams(authToken: string) {
+  return {
+    minProtocol: 1,
+    maxProtocol: 3,
+    client: {
+      id: "cli" as const,
+      version: PKG_VERSION,
+      platform: process.platform,
+      mode: "cli" as const,
+    },
+    role: "operator" as const,
+    scopes: ["operator.read"],
+    auth: { token: authToken || null },
+  };
+}
+
+/**
  * OpenClaw adapter — reads session data from the OpenClaw gateway via
  * its WebSocket RPC protocol. Falls back gracefully when the gateway
  * is unreachable.
@@ -85,15 +111,18 @@ export class OpenClawAdapter implements AgentAdapter {
   constructor(opts?: OpenClawAdapterOpts) {
     this.baseUrl = opts?.baseUrl || DEFAULT_BASE_URL;
     this.authToken =
-      opts?.authToken || process.env.OPENCLAW_WEBHOOK_TOKEN || "";
+      opts?.authToken ||
+      process.env.OPENCLAW_GATEWAY_TOKEN ||
+      process.env.OPENCLAW_WEBHOOK_TOKEN ||
+      "";
     this.rpcCall = opts?.rpcCall || this.defaultRpcCall.bind(this);
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {
     if (!this.authToken) {
       console.warn(
-        "Warning: OPENCLAW_WEBHOOK_TOKEN is not set — OpenClaw adapter cannot authenticate. " +
-          "Set this environment variable to connect to the gateway.",
+        "Warning: OPENCLAW_GATEWAY_TOKEN is not set — OpenClaw adapter cannot authenticate. " +
+          "Set OPENCLAW_GATEWAY_TOKEN (or OPENCLAW_WEBHOOK_TOKEN) to connect to the gateway.",
       );
       return [];
     }
@@ -109,7 +138,7 @@ export class OpenClawAdapter implements AgentAdapter {
       if (msg.includes("auth") || msg.includes("Auth")) {
         console.warn(
           `Warning: OpenClaw gateway authentication failed: ${msg}. ` +
-            "Check that OPENCLAW_WEBHOOK_TOKEN is valid.",
+            "Check that OPENCLAW_GATEWAY_TOKEN (or OPENCLAW_WEBHOOK_TOKEN) is valid.",
         );
       } else {
         console.warn(
@@ -174,7 +203,7 @@ export class OpenClawAdapter implements AgentAdapter {
   async status(sessionId: string): Promise<AgentSession> {
     if (!this.authToken) {
       throw new Error(
-        "OPENCLAW_WEBHOOK_TOKEN is not set — cannot connect to OpenClaw gateway",
+        "OPENCLAW_GATEWAY_TOKEN is not set — cannot connect to OpenClaw gateway",
       );
     }
 
@@ -321,7 +350,7 @@ export class OpenClawAdapter implements AgentAdapter {
   private async resolveKey(sessionId: string): Promise<string | null> {
     if (!this.authToken) {
       throw new Error(
-        "OPENCLAW_WEBHOOK_TOKEN is not set — cannot connect to OpenClaw gateway",
+        "OPENCLAW_GATEWAY_TOKEN is not set — cannot connect to OpenClaw gateway",
       );
     }
 
@@ -390,19 +419,7 @@ export class OpenClawAdapter implements AgentAdapter {
                 type: "req",
                 id: randomUUID(),
                 method: "connect",
-                params: {
-                  minProtocol: 1,
-                  maxProtocol: 1,
-                  client: {
-                    id: "agentctl",
-                    version: "0.1.0",
-                    platform: process.platform,
-                    mode: "cli",
-                  },
-                  role: "operator",
-                  scopes: ["operator.read"],
-                  auth: { token: this.authToken || null },
-                },
+                params: buildConnectParams(this.authToken),
               }),
             );
             return;
