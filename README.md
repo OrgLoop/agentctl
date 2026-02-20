@@ -17,6 +17,14 @@ agentctl intentionally does **not**:
 - Have a hook/reaction system (that's OrgLoop)
 - Make judgment calls about what to do (that's OpenClaw)
 
+## Why agentctl?
+
+You can use `claude code` (or any agent CLI) directly — agentctl is not a replacement. It's a supervisory layer for people and agents managing multiple concurrent coding sessions.
+
+What it adds: session discovery across all running Claude Code instances, lifecycle tracking that persists session info even after processes exit, a daemon with directory locks to prevent duplicate launches on the same working directory, fuse timers for automated resource cleanup, and a standard interface that works the same regardless of which coding agent is underneath. The adapter model means support for additional agent runtimes (Codex, Aider, etc.) can be added without changing the CLI or daemon interface.
+
+Over time, agentctl can extend to handle more concerns of headless coding — automating worktree bootstrap/teardown, running N parallel implementations across different adapters and models and judging who did it best, and other patterns that emerge as AI-assisted development matures.
+
 ## Installation
 
 ```bash
@@ -129,9 +137,15 @@ agentctl daemon uninstall  # Remove LaunchAgent
 
 Metrics are exposed at `http://localhost:9200/metrics` in Prometheus text format.
 
+## Architecture
+
+agentctl is structured in three layers: the **CLI** parses commands and formats output, the **daemon** provides persistent state (session tracking, directory locks, fuse timers, Prometheus metrics), and **adapters** bridge to specific agent runtimes. The CLI communicates with the daemon over a Unix socket at `~/.agentctl/agentctl.sock`.
+
+All session state is derived from native sources — agentctl never maintains its own session registry. The Claude Code adapter reads `~/.claude/projects/` and cross-references running processes; other adapters connect to their respective APIs. This means agentctl always reflects ground truth.
+
 ## Adapters
 
-agentctl uses an adapter architecture to support different agent runtimes.
+agentctl uses an adapter model to support different agent runtimes.
 
 ### Claude Code (default)
 
