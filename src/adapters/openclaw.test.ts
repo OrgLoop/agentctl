@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   OpenClawAdapter,
   type RpcCallFn,
@@ -51,18 +51,55 @@ describe("OpenClawAdapter", () => {
   });
 
   describe("list()", () => {
-    it("returns empty array when gateway is unreachable", async () => {
+    it("returns empty array with warning when token is missing", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const adapter = new OpenClawAdapter({
+        authToken: "",
+        rpcCall: makeMockRpc({}),
+      });
+      const sessions = await adapter.list();
+      expect(sessions).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("OPENCLAW_WEBHOOK_TOKEN is not set"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("returns empty array with warning when gateway is unreachable", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: async () => {
           throw new Error("connection refused");
         },
       });
       const sessions = await adapter.list();
       expect(sessions).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("OpenClaw gateway unreachable"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("warns about auth failure specifically", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const adapter = new OpenClawAdapter({
+        authToken: "bad-token",
+        rpcCall: async () => {
+          throw new Error("OpenClaw gateway auth failed");
+        },
+      });
+      const sessions = await adapter.list();
+      expect(sessions).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("authentication failed"),
+      );
+      warnSpy.mockRestore();
     });
 
     it("returns mapped sessions from gateway", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -96,6 +133,7 @@ describe("OpenClawAdapter", () => {
 
     it("classifies old sessions as idle", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -116,6 +154,7 @@ describe("OpenClawAdapter", () => {
 
     it("default list shows running and idle sessions", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -145,6 +184,7 @@ describe("OpenClawAdapter", () => {
 
     it("filters by status", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -175,6 +215,7 @@ describe("OpenClawAdapter", () => {
 
     it("uses session key as id when sessionId is missing", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -193,6 +234,7 @@ describe("OpenClawAdapter", () => {
 
     it("uses default model when row has no model", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -214,6 +256,7 @@ describe("OpenClawAdapter", () => {
   describe("peek()", () => {
     it("returns assistant messages from preview", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -253,6 +296,7 @@ describe("OpenClawAdapter", () => {
       }
 
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -283,6 +327,7 @@ describe("OpenClawAdapter", () => {
 
     it("throws for unknown session", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () => makeListResult([]),
         }),
@@ -295,6 +340,7 @@ describe("OpenClawAdapter", () => {
 
     it("supports prefix matching", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -322,8 +368,19 @@ describe("OpenClawAdapter", () => {
   });
 
   describe("status()", () => {
+    it("throws when token is missing", async () => {
+      const adapter = new OpenClawAdapter({
+        authToken: "",
+        rpcCall: makeMockRpc({}),
+      });
+      await expect(adapter.status("some-id")).rejects.toThrow(
+        "OPENCLAW_WEBHOOK_TOKEN is not set",
+      );
+    });
+
     it("returns session details", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
@@ -352,6 +409,7 @@ describe("OpenClawAdapter", () => {
 
     it("throws for unknown session", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () => makeListResult([]),
         }),
@@ -364,6 +422,7 @@ describe("OpenClawAdapter", () => {
 
     it("supports prefix matching", async () => {
       const adapter = new OpenClawAdapter({
+        authToken: "test-token",
         rpcCall: makeMockRpc({
           "sessions.list": () =>
             makeListResult([
