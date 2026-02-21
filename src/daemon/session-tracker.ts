@@ -118,6 +118,17 @@ export class SessionTracker {
   /** Track a newly launched session */
   track(session: AgentSession, adapterName: string): SessionRecord {
     const record = sessionToRecord(session, adapterName);
+
+    // Pending→UUID reconciliation: if this is a real session (not pending),
+    // remove any pending-PID placeholder with the same PID
+    if (!session.id.startsWith("pending-") && session.pid) {
+      for (const [id, existing] of Object.entries(this.state.getSessions())) {
+        if (id.startsWith("pending-") && existing.pid === session.pid) {
+          this.state.removeSession(id);
+        }
+      }
+    }
+
     this.state.setSession(session.id, record);
     return record;
   }
@@ -140,6 +151,18 @@ export class SessionTracker {
   /** List all tracked sessions */
   listSessions(opts?: { status?: string; all?: boolean }): SessionRecord[] {
     const sessions = Object.values(this.state.getSessions());
+
+    // Liveness check: mark sessions with dead PIDs as stopped
+    for (const s of sessions) {
+      if ((s.status === "running" || s.status === "idle") && s.pid) {
+        if (!this.isProcessAlive(s.pid)) {
+          s.status = "stopped";
+          s.stoppedAt = new Date().toISOString();
+          this.state.setSession(s.id, s);
+        }
+      }
+    }
+
     let filtered = sessions;
 
     if (opts?.status) {
@@ -165,6 +188,11 @@ export class SessionTracker {
     return Object.values(this.state.getSessions()).filter(
       (s) => s.status === "running" || s.status === "idle",
     ).length;
+  }
+
+  /** Remove a session from state entirely (used for ghost cleanup) */
+  removeSession(sessionId: string): void {
+    this.state.removeSession(sessionId);
   }
 
   /** Called when a session stops — returns the cwd for fuse/lock processing */
