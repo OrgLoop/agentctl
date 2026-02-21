@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
+import { CodexAdapter } from "./adapters/codex.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
 import { DaemonClient } from "./client/daemon-client.js";
 import type {
@@ -28,6 +29,7 @@ import { createWorktree, type WorktreeInfo } from "./worktree.js";
 
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
+  codex: new CodexAdapter(),
   openclaw: new OpenClawAdapter(),
 };
 
