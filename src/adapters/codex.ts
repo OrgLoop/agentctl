@@ -119,8 +119,7 @@ export class CodexAdapter implements AgentAdapter {
     this.codexDir = opts?.codexDir || DEFAULT_CODEX_DIR;
     this.sessionsDir = path.join(this.codexDir, "sessions");
     this.sessionsMetaDir =
-      opts?.sessionsMetaDir ||
-      path.join(this.codexDir, "agentctl", "sessions");
+      opts?.sessionsMetaDir || path.join(this.codexDir, "agentctl", "sessions");
     this.getPids = opts?.getPids || getCodexPids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
   }
@@ -216,10 +215,7 @@ export class CodexAdapter implements AgentAdapter {
     const env = { ...process.env, ...opts.env };
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
-    const logPath = path.join(
-      this.sessionsMetaDir,
-      `launch-${Date.now()}.log`,
-    );
+    const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
     const child = spawn("codex", args, {
@@ -296,10 +292,7 @@ export class CodexAdapter implements AgentAdapter {
               return msg.thread_id;
             }
             // Also check session_meta payload
-            if (
-              msg.type === "session_meta" &&
-              msg.payload?.id
-            ) {
+            if (msg.type === "session_meta" && msg.payload?.id) {
               return msg.payload.id;
             }
           } catch {
@@ -612,9 +605,7 @@ export class CodexAdapter implements AgentAdapter {
     runningPids: Map<number, CodexPidInfo>,
   ): AgentSession {
     const isRunning = this.isSessionRunning(info, runningPids);
-    const pid = isRunning
-      ? this.findMatchingPid(info, runningPids)
-      : undefined;
+    const pid = isRunning ? this.findMatchingPid(info, runningPids) : undefined;
 
     return {
       id: info.id,
@@ -766,9 +757,7 @@ export class CodexAdapter implements AgentAdapter {
     await fs.writeFile(metaPath, JSON.stringify(fullMeta, null, 2));
   }
 
-  async readSessionMeta(
-    sessionId: string,
-  ): Promise<CodexSessionMeta | null> {
+  async readSessionMeta(sessionId: string): Promise<CodexSessionMeta | null> {
     const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
     try {
       const raw = await fs.readFile(metaPath, "utf-8");
@@ -804,9 +793,7 @@ export class CodexAdapter implements AgentAdapter {
    * Used by isSessionRunning which is called in a tight loop.
    * Falls back to null if not found.
    */
-  private readSessionMetaSync(
-    sessionId: string,
-  ): CodexSessionMeta | null {
+  private readSessionMetaSync(sessionId: string): CodexSessionMeta | null {
     const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
     try {
       const raw = readFileSync(metaPath, "utf-8");
@@ -843,10 +830,7 @@ async function getCodexPids(): Promise<Map<number, CodexPidInfo>> {
       const command = fields.slice(10).join(" ");
 
       // Match codex exec or codex with flags — exclude interactive sessions
-      if (
-        !command.startsWith("codex exec") &&
-        !command.startsWith("codex --")
-      )
+      if (!command.startsWith("codex exec") && !command.startsWith("codex --"))
         continue;
       if (pid === process.pid) continue;
 
@@ -888,15 +872,6 @@ async function getCodexPids(): Promise<Map<number, CodexPidInfo>> {
   }
 
   return pids;
-}
-
-function extractTextContent(
-  content: Array<{ type: string; text?: string }>,
-): string {
-  return content
-    .filter((b) => (b.type === "text" || b.type === "output_text") && b.text)
-    .map((b) => b.text as string)
-    .join("\n");
 }
 
 function sleep(ms: number): Promise<void> {
