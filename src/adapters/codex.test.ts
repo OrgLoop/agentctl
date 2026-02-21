@@ -298,8 +298,6 @@ describe("CodexAdapter", () => {
 
   describe("PID detection", () => {
     it("session shows running when matching PID exists", async () => {
-      const sessionCreated = new Date("2026-02-20T10:00:00Z");
-
       await createFakeSession({
         id: "running-test-0000-0000-000000000000",
         cwd: "/tmp/running-project",
@@ -399,10 +397,7 @@ describe("CodexAdapter", () => {
         launchedAt: "2026-02-20T10:00:00.000Z",
       };
       await fs.writeFile(
-        path.join(
-          sessionsMetaDir,
-          "detached-test-0000-0000-000000000000.json",
-        ),
+        path.join(sessionsMetaDir, "detached-test-0000-0000-000000000000.json"),
         JSON.stringify(meta),
       );
 
@@ -434,10 +429,7 @@ describe("CodexAdapter", () => {
         launchedAt: "2026-02-20T10:00:00.000Z",
       };
       await fs.writeFile(
-        path.join(
-          sessionsMetaDir,
-          "dead-pid-test-0000-0000-000000000000.json",
-        ),
+        path.join(sessionsMetaDir, "dead-pid-test-0000-0000-000000000000.json"),
         JSON.stringify(meta),
       );
 
@@ -517,9 +509,7 @@ describe("CodexAdapter", () => {
         tokens: { in: 8173, out: 17 },
       });
 
-      const session = await adapter.status(
-        "token-test-0000-0000-000000000000",
-      );
+      const session = await adapter.status("token-test-0000-0000-000000000000");
       expect(session.tokens).toEqual({ in: 8173, out: 17 });
     });
   });
