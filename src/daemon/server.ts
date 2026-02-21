@@ -289,6 +289,18 @@ function createRequestHandler(ctx: HandlerContext) {
         const session = ctx.sessionTracker.getSession(params.id as string);
         if (!session) throw new Error(`Session not found: ${params.id}`);
 
+        // Ghost pending entry with dead PID: remove from state with --force
+        if (
+          session.id.startsWith("pending-") &&
+          params.force &&
+          session.pid &&
+          !isProcessAlive(session.pid)
+        ) {
+          ctx.lockManager.autoUnlock(session.id);
+          ctx.sessionTracker.removeSession(session.id);
+          return null;
+        }
+
         const adapter = ctx.adapters[session.adapter];
         if (!adapter) throw new Error(`Unknown adapter: ${session.adapter}`);
         await adapter.stop(session.id, {

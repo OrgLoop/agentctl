@@ -318,4 +318,82 @@ describe("SessionTracker", () => {
       expect(ids).toContain("different-session");
     });
   });
+
+  describe("ghost pending sessions (issue #27)", () => {
+    it("track() removes pending-PID entry when real UUID session registers with same PID", () => {
+      // Step 1: pending entry is created at launch time
+      tracker.track(
+        makeSession({ id: "pending-11111", status: "running", pid: 11111 }),
+        "claude-code",
+      );
+      expect(state.getSession("pending-11111")).toBeDefined();
+
+      // Step 2: real session registers with the same PID
+      tracker.track(
+        makeSession({
+          id: "real-uuid-session",
+          status: "running",
+          pid: 11111,
+        }),
+        "claude-code",
+      );
+
+      // pending entry should be consumed
+      expect(state.getSession("pending-11111")).toBeUndefined();
+      // real session should exist
+      expect(state.getSession("real-uuid-session")).toBeDefined();
+      expect(state.getSession("real-uuid-session")?.status).toBe("running");
+    });
+
+    it("listSessions marks running sessions with dead PIDs as stopped", () => {
+      // Create tracker with dead-PID checker
+      const deadPidTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => false,
+      });
+
+      // Track a running session with a PID that will be "dead"
+      deadPidTracker.track(
+        makeSession({ id: "ghost-session", status: "running", pid: 22222 }),
+        "claude-code",
+      );
+
+      // Listing should detect the dead PID and mark it stopped
+      const list = deadPidTracker.listSessions({ all: true });
+      const ghost = list.find((s) => s.id === "ghost-session");
+      expect(ghost?.status).toBe("stopped");
+      expect(ghost?.stoppedAt).toBeDefined();
+
+      // State should also be updated
+      const record = state.getSession("ghost-session");
+      expect(record?.status).toBe("stopped");
+    });
+
+    it("listSessions does not mark sessions with live PIDs as stopped", () => {
+      const livePidTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+      });
+
+      livePidTracker.track(
+        makeSession({ id: "live-session", status: "running", pid: 33333 }),
+        "claude-code",
+      );
+
+      const list = livePidTracker.listSessions();
+      const live = list.find((s) => s.id === "live-session");
+      expect(live?.status).toBe("running");
+    });
+
+    it("removeSession removes a session from state", () => {
+      tracker.track(
+        makeSession({ id: "pending-55555", status: "running", pid: 55555 }),
+        "claude-code",
+      );
+      expect(state.getSession("pending-55555")).toBeDefined();
+
+      tracker.removeSession("pending-55555");
+      expect(state.getSession("pending-55555")).toBeUndefined();
+    });
+  });
 });
