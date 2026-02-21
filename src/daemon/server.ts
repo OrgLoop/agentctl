@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { ClaudeCodeAdapter } from "../adapters/claude-code.js";
+import { CodexAdapter } from "../adapters/codex.js";
 import { OpenClawAdapter } from "../adapters/openclaw.js";
 import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
@@ -75,6 +76,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   // 5. Initialize subsystems
   const adapters: Record<string, AgentAdapter> = opts.adapters || {
     "claude-code": new ClaudeCodeAdapter(),
+    codex: new CodexAdapter(),
     openclaw: new OpenClawAdapter(),
     "pi-rust": new PiRustAdapter(),
   };
