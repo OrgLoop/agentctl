@@ -7,6 +7,7 @@ import path from "node:path";
 import { ClaudeCodeAdapter } from "../adapters/claude-code.js";
 import { CodexAdapter } from "../adapters/codex.js";
 import { OpenClawAdapter } from "../adapters/openclaw.js";
+import { OpenCodeAdapter } from "../adapters/opencode.js";
 import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
 import { migrateLocks } from "../migration/migrate-locks.js";
@@ -78,6 +79,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     "claude-code": new ClaudeCodeAdapter(),
     codex: new CodexAdapter(),
     openclaw: new OpenClawAdapter(),
+    opencode: new OpenCodeAdapter(),
     "pi-rust": new PiRustAdapter(),
   };
 

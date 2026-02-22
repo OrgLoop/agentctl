@@ -63,7 +63,7 @@ Session IDs support prefix matching — `agentctl peek abc123` matches any sessi
 
 ```bash
 agentctl list [options]
-  --adapter <name>     Filter by adapter (claude-code, codex, openclaw)
+  --adapter <name>     Filter by adapter (claude-code, codex, opencode, pi-rust, openclaw)
   --status <status>    Filter by status (running|stopped|idle|error)
   -a, --all            Include stopped sessions (last 7 days)
   --json               Output as JSON
@@ -290,6 +290,20 @@ agentctl launch codex -p "implement the feature"
 agentctl launch codex -p "fix the bug" --model gpt-5.2-codex
 ```
 
+### OpenCode
+
+Reads session data from `~/.local/share/opencode/storage/` and cross-references with running `opencode` processes. Supports headless execution via `opencode run`.
+
+OpenCode stores sessions as individual JSON files organized by project hash (SHA1 of the working directory path):
+
+- **Session files**: `storage/session/<projectHash>/<sessionId>.json` — session metadata (title, directory, timestamps, summary)
+- **Message files**: `storage/message/<sessionId>/<messageId>.json` — individual messages with token counts, cost, and model info
+- **Part files**: `storage/part/<messageId>/` — message content parts
+
+The adapter detects PID recycling via process start time verification, tracks detached processes that survive wrapper exit, and supports prefix matching for session IDs.
+
+Launch sessions with `agentctl launch opencode -p "your prompt"`.
+
 ### OpenClaw
 
 Connects to the OpenClaw gateway via WebSocket RPC. Read-only — sessions are managed through the gateway.
@@ -354,6 +368,7 @@ src/
   adapters/claude-code.ts        # Claude Code adapter
   adapters/codex.ts              # Codex CLI adapter
   adapters/openclaw.ts           # OpenClaw gateway adapter
+  adapters/opencode.ts           # OpenCode adapter
   daemon/server.ts               # Daemon: Unix socket server + HTTP metrics
   daemon/session-tracker.ts      # Session lifecycle tracking
   daemon/lock-manager.ts         # Directory locks
