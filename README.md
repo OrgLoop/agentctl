@@ -60,6 +60,72 @@ agentctl resume <session-id> "fix the failing tests"
 
 Session IDs support prefix matching — `agentctl peek abc123` matches any session starting with `abc123`.
 
+### Parallel Multi-Adapter Launch
+
+Launch the same prompt across multiple adapters (or the same adapter with different models). Each gets its own git worktree and runs in isolation:
+
+```bash
+# Launch across 3 adapters
+agentctl launch \
+  --adapter claude-code \
+  --adapter codex \
+  --adapter pi \
+  --cwd ~/code/mono \
+  -p "Implement the caching layer"
+
+# Launched 3 sessions (group: g-a1b2c3):
+#   claude-code  → ~/code/mono-try-g-a1b2c3-cc
+#   codex        → ~/code/mono-try-g-a1b2c3-codex
+#   pi           → ~/code/mono-try-g-a1b2c3-pi
+```
+
+Same adapter with different models:
+
+```bash
+agentctl launch \
+  --adapter claude-code --model claude-opus-4-6 \
+  --adapter claude-code --model claude-sonnet-4-5 \
+  --adapter codex \
+  --cwd ~/code/mono \
+  -p "Refactor the auth module"
+```
+
+Groups show up in `agentctl list` automatically:
+
+```bash
+agentctl list
+# ID        Status   Model           Group      CWD                          Prompt
+# f3a1...   running  opus-4-6        g-x1y2z3   ~/mono-try-g-x1y2z3-cc-opus  Refactor...
+# 8b2c...   running  sonnet-4-5      g-x1y2z3   ~/mono-try-g-x1y2z3-cc-son   Refactor...
+# c4d3...   done     gpt-5.2-codex   g-x1y2z3   ~/mono-try-g-x1y2z3-codex    Refactor...
+
+# Filter by group
+agentctl list --group g-x1y2z3
+```
+
+### Matrix Files
+
+For advanced sweep configurations, use a YAML matrix file:
+
+```yaml
+# matrix.yaml
+prompt: "Implement the caching layer"
+cwd: ~/code/mono
+matrix:
+  - adapter: claude-code
+    model:
+      - claude-opus-4-6
+      - claude-sonnet-4-5
+  - adapter: codex
+```
+
+```bash
+agentctl launch --matrix matrix.yaml
+# Launches 3 sessions: claude-code×opus, claude-code×sonnet, codex
+```
+
+Array values in `model` are expanded via cross-product.
+
 ## CLI Reference
 
 ### Session Management
@@ -84,6 +150,9 @@ agentctl launch [adapter] [options]
   --spec <path>        Spec file path
   --cwd <dir>          Working directory
   --model <model>      Model to use (e.g. sonnet, opus)
+  --adapter <name>     Adapter to launch (repeatable for parallel launch)
+  --matrix <file>      YAML matrix file for advanced sweep launch
+  --group <id>         Filter by launch group (for list command)
   --force              Override directory locks
 
 agentctl stop <id> [options]
@@ -115,6 +184,29 @@ agentctl unlock <directory>
 
 agentctl locks [options]
   --json               Output as JSON
+```
+
+### Worktree Management
+
+Manage git worktrees created by parallel launches or `--worktree` flag:
+
+```bash
+agentctl worktree list <repo>
+  --json               Output as JSON
+
+agentctl worktree clean <path> [options]
+  --repo <path>        Main repo path (auto-detected if omitted)
+  --delete-branch      Also delete the worktree's branch
+```
+
+Example:
+
+```bash
+# List all worktrees for a repo
+agentctl worktree list ~/code/mono
+
+# Clean up a worktree and its branch
+agentctl worktree clean ~/code/mono-try-g-a1b2c3-cc --delete-branch
 ```
 
 ### Lifecycle Hooks
@@ -149,6 +241,8 @@ Hook scripts receive context via environment variables:
 | `AGENTCTL_ADAPTER` | Adapter name (e.g. `claude-code`) |
 | `AGENTCTL_BRANCH` | Git branch (when using `--worktree`) |
 | `AGENTCTL_EXIT_CODE` | Process exit code (in `--on-complete`) |
+| `AGENTCTL_GROUP` | Launch group ID (in parallel launches) |
+| `AGENTCTL_MODEL` | Model name (when specified) |
 
 Hooks run with a 60-second timeout. If a hook fails, its stderr is printed but execution continues.
 
@@ -378,6 +472,11 @@ npm run lint          # biome check
 src/
   cli.ts                         # CLI entry point (commander)
   core/types.ts                  # Core interfaces
+  launch-orchestrator.ts         # Parallel multi-adapter launch orchestration
+  matrix-parser.ts               # YAML matrix file parser + cross-product expansion
+  worktree.ts                    # Git worktree create/list/clean
+  hooks.ts                       # Lifecycle hook runner
+  merge.ts                       # Git commit/push/PR for sessions
   adapters/claude-code.ts        # Claude Code adapter
   adapters/codex.ts              # Codex CLI adapter
   adapters/openclaw.ts           # OpenClaw gateway adapter
