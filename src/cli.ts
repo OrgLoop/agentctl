@@ -15,6 +15,7 @@ import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { CodexAdapter } from "./adapters/codex.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
 import { OpenCodeAdapter } from "./adapters/opencode.js";
+import { PiAdapter } from "./adapters/pi.js";
 import { PiRustAdapter } from "./adapters/pi-rust.js";
 import { DaemonClient } from "./client/daemon-client.js";
 import type {
@@ -34,6 +35,7 @@ const adapters: Record<string, AgentAdapter> = {
   codex: new CodexAdapter(),
   openclaw: new OpenClawAdapter(),
   opencode: new OpenCodeAdapter(),
+  pi: new PiAdapter(),
   "pi-rust": new PiRustAdapter(),
 };
 
