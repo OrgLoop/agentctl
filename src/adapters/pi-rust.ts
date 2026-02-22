@@ -240,7 +240,7 @@ export class PiRustAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = ["--print", "-p", opts.prompt];
+    const args = ["--print", "--mode", "json", opts.prompt];
 
     if (opts.model) {
       args.unshift("--model", opts.model);
