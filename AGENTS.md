@@ -28,6 +28,7 @@ npm run lint:fix   # biome check --write
 - `src/adapters/codex.ts` — Codex CLI adapter (reads ~/.codex/sessions/, cross-refs PIDs)
 - `src/adapters/openclaw.ts` — OpenClaw gateway adapter (WebSocket RPC)
 - `src/adapters/opencode.ts` — OpenCode adapter (reads ~/.local/share/opencode/storage/, cross-refs PIDs)
+- `src/adapters/pi.ts` — Pi coding agent adapter (reads ~/.pi/, cross-refs PIDs)
 - `src/adapters/pi-rust.ts` — Pi Rust adapter (reads ~/.pi/agent/sessions/, cross-refs PIDs)
 - `src/cli.ts` — CLI entry point (commander)
 - `src/daemon/server.ts` — Daemon: Unix socket server + HTTP metrics

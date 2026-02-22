@@ -55,14 +55,19 @@ export class SessionTracker {
 
           if (!existing) {
             this.state.setSession(session.id, record);
-          } else if (existing.status !== record.status) {
-            // Status changed — update
+          } else if (
+            existing.status !== record.status ||
+            (!existing.model && record.model)
+          ) {
+            // Status changed or model resolved — update
             this.state.setSession(session.id, {
               ...existing,
               status: record.status,
               stoppedAt: record.stoppedAt,
+              model: record.model || existing.model,
               tokens: record.tokens,
               cost: record.cost,
+              prompt: record.prompt || existing.prompt,
             });
           }
         }

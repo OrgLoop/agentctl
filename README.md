@@ -2,7 +2,7 @@
 
 Universal agent supervision interface. Monitor and control AI coding agents from a single CLI.
 
-agentctl reads from native sources (Claude Code's `~/.claude/` directory, running processes) and provides a standard interface to list, inspect, stop, launch, and resume agent sessions. It never replicates state — it reads what's actually happening.
+agentctl reads from native sources (Claude Code's `~/.claude/` directory, Pi's `~/.pi/` directory, running processes) and provides a standard interface to list, inspect, stop, launch, and resume agent sessions. It never replicates state — it reads what's actually happening.
 
 ## Layer Model
 
@@ -48,6 +48,9 @@ agentctl peek <session-id>
 # Launch a new Claude Code session
 agentctl launch -p "Read the spec and implement phase 2"
 
+# Launch a new Pi session
+agentctl launch pi -p "Refactor the auth module"
+
 # Stop a session
 agentctl stop <session-id>
 
@@ -63,7 +66,7 @@ Session IDs support prefix matching — `agentctl peek abc123` matches any sessi
 
 ```bash
 agentctl list [options]
-  --adapter <name>     Filter by adapter (claude-code, codex, opencode, pi-rust, openclaw)
+  --adapter <name>     Filter by adapter (claude-code, codex, opencode, pi, pi-rust, openclaw)
   --status <status>    Filter by status (running|stopped|idle|error)
   -a, --all            Include stopped sessions (last 7 days)
   --json               Output as JSON
@@ -268,7 +271,7 @@ scrape_configs:
 
 agentctl is structured in three layers: the **CLI** parses commands and formats output, the **daemon** provides persistent state (session tracking, directory locks, fuse timers, Prometheus metrics), and **adapters** bridge to specific agent runtimes. The CLI communicates with the daemon over a Unix socket at `~/.agentctl/agentctl.sock`.
 
-All session state is derived from native sources — agentctl never maintains its own session registry. The Claude Code adapter reads `~/.claude/projects/` and cross-references running processes; other adapters connect to their respective APIs. This means agentctl always reflects ground truth.
+All session state is derived from native sources — agentctl never maintains its own session registry. The Claude Code adapter reads `~/.claude/projects/` and cross-references running processes; the Pi adapter reads `~/.pi/agent/sessions/` JSONL files; other adapters connect to their respective APIs. This means agentctl always reflects ground truth.
 
 ## Adapters
 
@@ -303,6 +306,16 @@ OpenCode stores sessions as individual JSON files organized by project hash (SHA
 The adapter detects PID recycling via process start time verification, tracks detached processes that survive wrapper exit, and supports prefix matching for session IDs.
 
 Launch sessions with `agentctl launch opencode -p "your prompt"`.
+
+### Pi
+
+Reads session data from `~/.pi/agent/sessions/` and cross-references with running `pi` processes. Pi stores sessions as JSONL files organized by cwd slug — each file starts with a `type:'session'` header containing metadata (id, cwd, provider, modelId, thinkingLevel, version).
+
+Detects PID recycling via process start time verification. Tracks detached processes that survive wrapper exit. Persists session metadata in `~/.pi/agentctl/sessions/` for status checks after the launching wrapper exits.
+
+Launch uses Pi's print mode (`pi -p "prompt"`) for headless execution. Resume launches a new Pi session in the same working directory since Pi doesn't have a native `--continue` flag.
+
+Requires the `pi` binary (npm: `@mariozechner/pi-coding-agent`) to be available on PATH.
 
 ### OpenClaw
 
@@ -369,6 +382,8 @@ src/
   adapters/codex.ts              # Codex CLI adapter
   adapters/openclaw.ts           # OpenClaw gateway adapter
   adapters/opencode.ts           # OpenCode adapter
+  adapters/pi.ts                 # Pi coding agent adapter
+  adapters/pi-rust.ts            # Pi Rust adapter
   daemon/server.ts               # Daemon: Unix socket server + HTTP metrics
   daemon/session-tracker.ts      # Session lifecycle tracking
   daemon/lock-manager.ts         # Directory locks
