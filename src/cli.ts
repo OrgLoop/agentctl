@@ -27,6 +27,12 @@ import type {
 import type { DaemonStatus } from "./daemon/server.js";
 import type { FuseTimer, Lock, SessionRecord } from "./daemon/state.js";
 import { runHook } from "./hooks.js";
+import {
+  type AdapterSlot,
+  orchestrateLaunch,
+  parseAdapterSlots,
+} from "./launch-orchestrator.js";
+import { expandMatrix, parseMatrixFile } from "./matrix-parser.js";
 import { mergeSession } from "./merge.js";
 import { createWorktree, type WorktreeInfo } from "./worktree.js";
 
@@ -99,28 +105,38 @@ function getAllAdapters(): AgentAdapter[] {
 
 // --- Formatters ---
 
-function formatSession(s: AgentSession): Record<string, string> {
-  return {
+function formatSession(
+  s: AgentSession,
+  showGroup: boolean,
+): Record<string, string> {
+  const row: Record<string, string> = {
     ID: s.id.slice(0, 8),
     Status: s.status,
     Model: s.model || "-",
-    CWD: s.cwd ? shortenPath(s.cwd) : "-",
-    PID: s.pid?.toString() || "-",
-    Started: timeAgo(s.startedAt),
-    Prompt: (s.prompt || "-").slice(0, 60),
   };
+  if (showGroup) row.Group = s.group || "-";
+  row.CWD = s.cwd ? shortenPath(s.cwd) : "-";
+  row.PID = s.pid?.toString() || "-";
+  row.Started = timeAgo(s.startedAt);
+  row.Prompt = (s.prompt || "-").slice(0, 60);
+  return row;
 }
 
-function formatRecord(s: SessionRecord): Record<string, string> {
-  return {
+function formatRecord(
+  s: SessionRecord,
+  showGroup: boolean,
+): Record<string, string> {
+  const row: Record<string, string> = {
     ID: s.id.slice(0, 8),
     Status: s.status,
     Model: s.model || "-",
-    CWD: s.cwd ? shortenPath(s.cwd) : "-",
-    PID: s.pid?.toString() || "-",
-    Started: timeAgo(new Date(s.startedAt)),
-    Prompt: (s.prompt || "-").slice(0, 60),
   };
+  if (showGroup) row.Group = s.group || "-";
+  row.CWD = s.cwd ? shortenPath(s.cwd) : "-";
+  row.PID = s.pid?.toString() || "-";
+  row.Started = timeAgo(new Date(s.startedAt));
+  row.Prompt = (s.prompt || "-").slice(0, 60);
+  return row;
 }
 
 function shortenPath(p: string): string {
@@ -227,7 +243,8 @@ program
       if (opts.json) {
         printJson(sessions);
       } else {
-        printTable(sessions.map(formatRecord));
+        const hasGroups = sessions.some((s) => s.group);
+        printTable(sessions.map((s) => formatRecord(s, hasGroups)));
       }
       return;
     }
@@ -249,7 +266,8 @@ program
     if (opts.json) {
       printJson(sessions.map(sessionToJson));
     } else {
-      printTable(sessions.map(formatSession));
+      const hasGroups = sessions.some((s) => s.group);
+      printTable(sessions.map((s) => formatSession(s, hasGroups)));
     }
   });
 
@@ -270,7 +288,7 @@ program
         if (opts.json) {
           printJson(session);
         } else {
-          const fmt = formatRecord(session);
+          const fmt = formatRecord(session, !!session.group);
           for (const [k, v] of Object.entries(fmt)) {
             console.log(`${k.padEnd(10)} ${v}`);
           }
@@ -297,7 +315,7 @@ program
         if (opts.json) {
           printJson(sessionToJson(session));
         } else {
-          const fmt = formatSession(session);
+          const fmt = formatSession(session, !!session.group);
           for (const [k, v] of Object.entries(fmt)) {
             console.log(`${k.padEnd(10)} ${v}`);
           }
@@ -433,7 +451,7 @@ program
 // launch
 program
   .command("launch [adapter]")
-  .description("Launch a new agent session")
+  .description("Launch a new agent session (or multiple with --adapter flags)")
   .requiredOption("-p, --prompt <text>", "Prompt to send")
   .option("--spec <path>", "Spec file path")
   .option("--cwd <dir>", "Working directory")
@@ -444,13 +462,120 @@ program
     "Auto-create git worktree from this repo before launch",
   )
   .option("--branch <name>", "Branch name for --worktree")
+  .option(
+    "--adapter <name>",
+    "Adapter to launch (repeatable for parallel launch)",
+    collectAdapter,
+    [] as string[],
+  )
+  .option("--matrix <file>", "YAML matrix file for advanced sweep launch")
   .option("--on-create <script>", "Hook: run after session is created")
   .option("--on-complete <script>", "Hook: run after session completes")
   .option("--pre-merge <script>", "Hook: run before merge")
   .option("--post-merge <script>", "Hook: run after merge")
-  .action(async (adapterName: string | undefined, opts) => {
+  .allowUnknownOption() // Allow interleaved --adapter/--model for parseAdapterSlots
+  .action(async (adapterName: string | undefined, opts, cmd) => {
     let cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
-    const name = adapterName || "claude-code";
+
+    // Collect hooks
+    const hooks: LifecycleHooks | undefined =
+      opts.onCreate || opts.onComplete || opts.preMerge || opts.postMerge
+        ? {
+            onCreate: opts.onCreate,
+            onComplete: opts.onComplete,
+            preMerge: opts.preMerge,
+            postMerge: opts.postMerge,
+          }
+        : undefined;
+
+    // --- Multi-adapter / matrix detection ---
+    let slots: AdapterSlot[] = [];
+
+    if (opts.matrix) {
+      // Matrix file mode
+      try {
+        const matrixFile = await parseMatrixFile(opts.matrix);
+        slots = expandMatrix(matrixFile);
+        // Matrix can override cwd and prompt
+        if (matrixFile.cwd) cwd = path.resolve(matrixFile.cwd);
+      } catch (err) {
+        console.error(`Failed to parse matrix file: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    } else {
+      // Check for multi-adapter via raw argv parsing
+      // We need raw argv because commander can't handle interleaved
+      // --adapter A --model M1 --adapter B --model M2
+      const rawArgs = process.argv.slice(2);
+      const adapterCount = rawArgs.filter(
+        (a) => a === "--adapter" || a === "-A",
+      ).length;
+
+      if (adapterCount > 1) {
+        // Multi-adapter mode: parse from raw args
+        slots = parseAdapterSlots(rawArgs);
+      } else if (adapterCount === 1 && opts.adapter?.length === 1) {
+        // Single --adapter flag — could still be multi if model is specified
+        // but this is the normal single-adapter path via --adapter flag
+      }
+    }
+
+    // --- Parallel launch path ---
+    if (slots.length > 1) {
+      const daemonRunning = await ensureDaemon();
+
+      try {
+        const result = await orchestrateLaunch({
+          slots,
+          prompt: opts.prompt,
+          spec: opts.spec,
+          cwd,
+          hooks,
+          adapters,
+          onSessionLaunched: (slotResult) => {
+            // Track in daemon if available
+            if (daemonRunning && !slotResult.error) {
+              client
+                .call("session.launch.track", {
+                  id: slotResult.sessionId,
+                  adapter: slotResult.slot.adapter,
+                  cwd: slotResult.cwd,
+                  group: result.groupId,
+                })
+                .catch(() => {
+                  // Best effort — session will be picked up by poll
+                });
+            }
+          },
+        });
+
+        console.log(
+          `\nLaunched ${result.results.length} sessions (group: ${result.groupId}):`,
+        );
+        for (const r of result.results) {
+          const label = r.slot.model
+            ? `${r.slot.adapter} (${r.slot.model})`
+            : r.slot.adapter;
+          if (r.error) {
+            console.log(`  ✗ ${label} — ${r.error}`);
+          } else {
+            console.log(
+              `  ${label}  → ${shortenPath(r.cwd)}  (${r.sessionId.slice(0, 8)})`,
+            );
+          }
+        }
+      } catch (err) {
+        console.error(`Parallel launch failed: ${(err as Error).message}`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    // --- Single adapter launch path (original behavior) ---
+    const name =
+      slots.length === 1 ? slots[0].adapter : adapterName || "claude-code";
+    const model =
+      slots.length === 1 && slots[0].model ? slots[0].model : opts.model;
 
     // FEAT-1: Worktree lifecycle
     let worktreeInfo: WorktreeInfo | undefined;
@@ -472,17 +597,6 @@ program
       }
     }
 
-    // Collect hooks
-    const hooks: LifecycleHooks | undefined =
-      opts.onCreate || opts.onComplete || opts.preMerge || opts.postMerge
-        ? {
-            onCreate: opts.onCreate,
-            onComplete: opts.onComplete,
-            preMerge: opts.preMerge,
-            postMerge: opts.postMerge,
-          }
-        : undefined;
-
     const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
@@ -492,7 +606,7 @@ program
           prompt: opts.prompt,
           cwd,
           spec: opts.spec,
-          model: opts.model,
+          model,
           force: opts.force,
           worktree: worktreeInfo
             ? { repo: worktreeInfo.repo, branch: worktreeInfo.branch }
@@ -533,7 +647,7 @@ program
         prompt: opts.prompt,
         spec: opts.spec,
         cwd,
-        model: opts.model,
+        model,
         hooks,
       });
       console.log(
@@ -554,6 +668,11 @@ program
       process.exit(1);
     }
   });
+
+/** Commander collect callback for repeatable --adapter */
+function collectAdapter(value: string, previous: string[]): string[] {
+  return previous.concat([value]);
+}
 
 // events
 program

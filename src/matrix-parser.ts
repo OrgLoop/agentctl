@@ -60,7 +60,9 @@ export async function parseMatrixFile(filePath: string): Promise<MatrixFile> {
   // Validate entries
   for (const entry of parsed.matrix) {
     if (!entry.adapter || typeof entry.adapter !== "string") {
-      throw new Error("Each matrix entry must have an 'adapter' field (string)");
+      throw new Error(
+        "Each matrix entry must have an 'adapter' field (string)",
+      );
     }
   }
 
