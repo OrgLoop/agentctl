@@ -64,10 +64,7 @@ interface PiSessionHeader {
   version?: string;
 }
 
-interface PiMessage {
-  type: "message";
-  id?: string;
-  parentId?: string | null;
+interface PiMessagePayload {
   role: "user" | "assistant" | "toolResult";
   content: string | Array<{ type: string; text?: string }>;
   usage?: {
@@ -75,9 +72,19 @@ interface PiMessage {
     output?: number;
     cacheRead?: number;
     cacheWrite?: number;
-    cost?: number;
+    totalTokens?: number;
+    cost?:
+      | number
+      | { input?: number; output?: number; cacheRead?: number; total?: number };
   };
   stopReason?: string;
+}
+
+interface PiMessage {
+  type: "message";
+  id?: string;
+  parentId?: string | null;
+  message: PiMessagePayload;
 }
 
 interface PiModelChange {
@@ -168,9 +175,36 @@ export class PiAdapter implements AgentAdapter {
   async peek(sessionId: string, opts?: PeekOpts): Promise<string> {
     const lines = opts?.lines ?? 20;
     const disc = await this.findSession(sessionId);
-    if (!disc) throw new Error(`Session not found: ${sessionId}`);
 
-    const content = await fs.readFile(disc.filePath, "utf-8");
+    // Fallback for pending-* sessions: read from the launch log file
+    if (!disc) {
+      const meta = await this.readSessionMeta(sessionId);
+      if (meta?.sessionId) {
+        // Try to find the session by the metadata's session ID
+        const resolved = await this.findSession(meta.sessionId);
+        if (resolved) {
+          return this.peekFromJsonl(resolved.filePath, lines);
+        }
+      }
+      const logPath = await this.getLogPathForSession(sessionId);
+      if (logPath) {
+        try {
+          const content = await fs.readFile(logPath, "utf-8");
+          const logLines = content.trim().split("\n");
+          return logLines.slice(-lines).join("\n") || "(no output)";
+        } catch {
+          // log file unreadable
+        }
+      }
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    return this.peekFromJsonl(disc.filePath, lines);
+  }
+
+  /** Extract assistant messages from a JSONL session file */
+  private async peekFromJsonl(filePath: string, lines: number): Promise<string> {
+    const content = await fs.readFile(filePath, "utf-8");
     const jsonlLines = content.trim().split("\n");
 
     const assistantMessages: string[] = [];
@@ -179,8 +213,9 @@ export class PiAdapter implements AgentAdapter {
         const entry = JSON.parse(line) as PiJSONLEntry;
         if (entry.type === "message") {
           const msg = entry as PiMessage;
-          if (msg.role === "assistant" && msg.content) {
-            const text = extractContent(msg.content);
+          const payload = msg.message;
+          if (payload?.role === "assistant" && payload.content) {
+            const text = extractContent(payload.content);
             if (text) assistantMessages.push(text);
           }
         }
@@ -194,6 +229,35 @@ export class PiAdapter implements AgentAdapter {
     return recent.join("\n---\n");
   }
 
+  /** Get the log file path for a pending session from metadata */
+  private async getLogPathForSession(sessionId: string): Promise<string | null> {
+    const meta = await this.readSessionMeta(sessionId);
+    if (!meta) return null;
+    // The log path is stored in the launch metadata directory
+    const logPath = path.join(this.sessionsMetaDir, `launch-${new Date(meta.launchedAt).getTime()}.log`);
+    try {
+      await fs.access(logPath);
+      return logPath;
+    } catch {
+      // Also scan for log files near the launch time
+      try {
+        const files = await fs.readdir(this.sessionsMetaDir);
+        const launchMs = new Date(meta.launchedAt).getTime();
+        for (const file of files) {
+          if (!file.startsWith("launch-") || !file.endsWith(".log")) continue;
+          const tsStr = file.replace("launch-", "").replace(".log", "");
+          const ts = Number(tsStr);
+          if (!Number.isNaN(ts) && Math.abs(ts - launchMs) < 2000) {
+            return path.join(this.sessionsMetaDir, file);
+          }
+        }
+      } catch {
+        // dir doesn't exist
+      }
+    }
+    return null;
+  }
+
   async status(sessionId: string): Promise<AgentSession> {
     const runningPids = await this.getPids();
     const disc = await this.findSession(sessionId);
@@ -203,7 +267,7 @@ export class PiAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = ["-p", opts.prompt];
+    const args = ["-p", opts.prompt, "--mode", "json"];
 
     if (opts.model) {
       args.unshift("--model", opts.model);
@@ -220,7 +284,7 @@ export class PiAdapter implements AgentAdapter {
     const child = spawn("pi", args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, "ignore"],
+      stdio: ["ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -233,11 +297,15 @@ export class PiAdapter implements AgentAdapter {
     // Close our handle — child keeps its own fd open
     await logFd.close();
 
-    // Try to extract the session ID from the log output.
-    // Pi's session header has type: "session" with an id field.
+    // Try to extract the session ID from the JSON-mode stdout output.
+    // Pi's first JSON line has type: "session" with an id field.
     let resolvedSessionId: string | undefined;
     if (pid) {
       resolvedSessionId = await this.pollForSessionId(logPath, pid, 5000);
+      // Fallback: scan session files directory for a newly created file
+      if (!resolvedSessionId) {
+        resolvedSessionId = await this.pollSessionDir(cwd, now, pid, 3000);
+      }
     }
 
     const sessionId =
@@ -312,6 +380,54 @@ export class PiAdapter implements AgentAdapter {
         process.kill(pid, 0);
       } catch {
         break; // Process died
+      }
+      await sleep(200);
+    }
+    return undefined;
+  }
+
+  /**
+   * Fallback: poll the Pi sessions directory for a new JSONL file
+   * created after the launch time, matching the cwd.
+   */
+  private async pollSessionDir(
+    cwd: string,
+    launchTime: Date,
+    pid: number,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
+    // Resolve symlinks (macOS: /tmp → /private/tmp) so slug matches Pi's resolved path
+    let resolvedCwd = cwd;
+    try {
+      resolvedCwd = await fs.realpath(cwd);
+    } catch {
+      // Path might not exist yet — use original
+    }
+    // Pi uses a cwd-slug directory: cwd with / replaced by - and surrounded by --
+    const cwdSlug = `--${resolvedCwd.replace(/\//g, "-")}--`;
+    const slugDir = path.join(this.sessionsDir, cwdSlug);
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        const files = await fs.readdir(slugDir);
+        for (const file of files) {
+          if (!file.endsWith(".jsonl")) continue;
+          const filePath = path.join(slugDir, file);
+          const stat = await fs.stat(filePath);
+          // Only consider files created after (or very near) launch time
+          if (stat.birthtimeMs >= launchTime.getTime() - 2000) {
+            const header = await this.parseSessionHeader(filePath);
+            if (header?.id) return header.id;
+          }
+        }
+      } catch {
+        // Dir may not exist yet
+      }
+      try {
+        process.kill(pid, 0);
+      } catch {
+        break;
       }
       await sleep(200);
     }
@@ -689,10 +805,17 @@ export class PiAdapter implements AgentAdapter {
           const entry = JSON.parse(line) as PiJSONLEntry;
           if (entry.type === "message") {
             const msg = entry as PiMessage;
-            if (msg.role === "assistant" && msg.usage) {
-              totalIn += msg.usage.input || 0;
-              totalOut += msg.usage.output || 0;
-              totalCost += msg.usage.cost || 0;
+            const payload = msg.message;
+            if (payload?.role === "assistant" && payload.usage) {
+              totalIn += payload.usage.input || 0;
+              totalOut += payload.usage.output || 0;
+              // Pi cost can be a number or an object with a total field
+              const rawCost = payload.usage.cost;
+              if (typeof rawCost === "number") {
+                totalCost += rawCost;
+              } else if (rawCost && typeof rawCost === "object") {
+                totalCost += rawCost.total || 0;
+              }
             }
           } else if (entry.type === "model_change") {
             model = (entry as PiModelChange).modelId;
@@ -722,8 +845,9 @@ export class PiAdapter implements AgentAdapter {
           const entry = JSON.parse(line) as PiJSONLEntry;
           if (entry.type === "message") {
             const msg = entry as PiMessage;
-            if (msg.role === "user" && msg.content) {
-              const text = extractContent(msg.content);
+            const payload = msg.message;
+            if (payload?.role === "user" && payload.content) {
+              const text = extractContent(payload.content);
               return text?.slice(0, 200);
             }
           }

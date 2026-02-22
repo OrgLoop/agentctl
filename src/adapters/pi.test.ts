@@ -33,6 +33,13 @@ afterEach(async () => {
 
 // --- Helper to create fake Pi session data ---
 
+interface FakeMessagePayload {
+  role: string;
+  content: unknown;
+  usage?: Record<string, unknown>;
+  stopReason?: string;
+}
+
 interface FakeSessionOpts {
   id: string;
   cwdSlug: string;
@@ -42,7 +49,25 @@ interface FakeSessionOpts {
   modelId?: string;
   thinkingLevel?: string;
   version?: string;
+  /** Raw JSONL entries. For type:"message" entries, provide the Pi v3 nested format:
+   *  { type: "message", id, message: { role, content, usage?, stopReason? } }
+   *  Helper: use msg() to create them conveniently.
+   */
   messages?: Array<Record<string, unknown>>;
+}
+
+/** Helper to create Pi v3 format message entries */
+function msg(
+  id: string,
+  payload: FakeMessagePayload,
+  parentId?: string | null,
+): Record<string, unknown> {
+  return {
+    type: "message",
+    id,
+    parentId: parentId ?? null,
+    message: payload,
+  };
 }
 
 async function createFakePiSession(opts: FakeSessionOpts) {
@@ -71,8 +96,8 @@ async function createFakePiSession(opts: FakeSessionOpts) {
   );
 
   // Messages
-  for (const msg of opts.messages || []) {
-    lines.push(JSON.stringify(msg));
+  for (const m of opts.messages || []) {
+    lines.push(JSON.stringify(m));
   }
 
   await fs.writeFile(filePath, lines.join("\n"));
@@ -109,21 +134,17 @@ describe("PiAdapter", () => {
         cwdSlug: "test-project",
         cwd: "/Users/test/test-project",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "user",
-            content: "Hello world",
-          },
-          {
-            type: "message",
-            id: "msg2",
-            parentId: "msg1",
-            role: "assistant",
-            content: "Hello! How can I help?",
-            usage: { input: 100, output: 50, cost: 0.003 },
-            stopReason: "end_turn",
-          },
+          msg("msg1", { role: "user", content: "Hello world" }),
+          msg(
+            "msg2",
+            {
+              role: "assistant",
+              content: "Hello! How can I help?",
+              usage: { input: 100, output: 50, cost: 0.003 },
+              stopReason: "end_turn",
+            },
+            "msg1",
+          ),
         ],
       });
 
@@ -276,30 +297,27 @@ describe("PiAdapter", () => {
         cwdSlug: "peek-test",
         cwd: "/Users/test/peek-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "user",
-            content: "What is 2+2?",
-          },
-          {
-            type: "message",
-            id: "msg2",
-            parentId: "msg1",
-            role: "assistant",
-            content: "2+2 equals 4.",
-            usage: { input: 100, output: 20 },
-            stopReason: "end_turn",
-          },
-          {
-            type: "message",
-            id: "msg3",
-            parentId: "msg2",
-            role: "assistant",
-            content: "Would you like to know more?",
-            usage: { input: 120, output: 15 },
-            stopReason: "end_turn",
-          },
+          msg("msg1", { role: "user", content: "What is 2+2?" }),
+          msg(
+            "msg2",
+            {
+              role: "assistant",
+              content: "2+2 equals 4.",
+              usage: { input: 100, output: 20 },
+              stopReason: "end_turn",
+            },
+            "msg1",
+          ),
+          msg(
+            "msg3",
+            {
+              role: "assistant",
+              content: "Would you like to know more?",
+              usage: { input: 120, output: 15 },
+              stopReason: "end_turn",
+            },
+            "msg2",
+          ),
         ],
       });
 
@@ -314,12 +332,7 @@ describe("PiAdapter", () => {
         cwdSlug: "string-test",
         cwd: "/Users/test/string-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "assistant",
-            content: "Plain string response.",
-          },
+          msg("msg1", { role: "assistant", content: "Plain string response." }),
         ],
       });
 
@@ -333,15 +346,13 @@ describe("PiAdapter", () => {
         cwdSlug: "array-test",
         cwd: "/Users/test/array-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "assistant",
             content: [
               { type: "text", text: "First block." },
               { type: "text", text: "Second block." },
             ],
-          },
+          }),
         ],
       });
 
@@ -353,14 +364,17 @@ describe("PiAdapter", () => {
     it("respects line limit", async () => {
       const messages = [];
       for (let i = 0; i < 10; i++) {
-        messages.push({
-          type: "message",
-          id: `msg${i}`,
-          parentId: i > 0 ? `msg${i - 1}` : null,
-          role: "assistant",
-          content: `Message ${i}`,
-          usage: { input: 10, output: 5 },
-        });
+        messages.push(
+          msg(
+            `msg${i}`,
+            {
+              role: "assistant",
+              content: `Message ${i}`,
+              usage: { input: 10, output: 5 },
+            },
+            i > 0 ? `msg${i - 1}` : null,
+          ),
+        );
       }
 
       await createFakePiSession({
@@ -392,12 +406,7 @@ describe("PiAdapter", () => {
         cwdSlug: "prefix-test",
         cwd: "/Users/test/prefix-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "assistant",
-            content: "Found by prefix!",
-          },
+          msg("msg1", { role: "assistant", content: "Found by prefix!" }),
         ],
       });
 
@@ -411,12 +420,10 @@ describe("PiAdapter", () => {
         cwdSlug: "mixed-test",
         cwd: "/Users/test/mixed-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "assistant",
             content: "Before model change.",
-          },
+          }),
           {
             type: "model_change",
             modelId: "claude-opus-4-6",
@@ -425,12 +432,10 @@ describe("PiAdapter", () => {
             type: "thinking_level_change",
             thinkingLevel: "high",
           },
-          {
-            type: "message",
-            id: "msg2",
+          msg("msg2", {
             role: "assistant",
             content: "After model change.",
-          },
+          }),
         ],
       });
 
@@ -446,24 +451,9 @@ describe("PiAdapter", () => {
         cwdSlug: "roles-test",
         cwd: "/Users/test/roles-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "user",
-            content: "User message",
-          },
-          {
-            type: "message",
-            id: "msg2",
-            role: "assistant",
-            content: "Assistant response",
-          },
-          {
-            type: "message",
-            id: "msg3",
-            role: "toolResult",
-            content: "Tool output",
-          },
+          msg("msg1", { role: "user", content: "User message" }),
+          msg("msg2", { role: "assistant", content: "Assistant response" }),
+          msg("msg3", { role: "toolResult", content: "Tool output" }),
         ],
       });
 
@@ -485,21 +475,17 @@ describe("PiAdapter", () => {
         thinkingLevel: "high",
         version: "2.1.0",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "user",
-            content: "status check",
-          },
-          {
-            type: "message",
-            id: "msg2",
-            parentId: "msg1",
-            role: "assistant",
-            content: "Done.",
-            usage: { input: 500, output: 200, cost: 0.015 },
-            stopReason: "end_turn",
-          },
+          msg("msg1", { role: "user", content: "status check" }),
+          msg(
+            "msg2",
+            {
+              role: "assistant",
+              content: "Done.",
+              usage: { input: 500, output: 200, cost: 0.015 },
+              stopReason: "end_turn",
+            },
+            "msg1",
+          ),
         ],
       });
 
@@ -528,18 +514,11 @@ describe("PiAdapter", () => {
         cwdSlug: "prompt-test",
         cwd: "/Users/test/prompt-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "user",
             content: "Implement the login feature",
-          },
-          {
-            type: "message",
-            id: "msg2",
-            role: "assistant",
-            content: "Sure!",
-          },
+          }),
+          msg("msg2", { role: "assistant", content: "Sure!" }),
         ],
       });
 
@@ -553,14 +532,7 @@ describe("PiAdapter", () => {
         id: "long-prompt-session",
         cwdSlug: "long-prompt-test",
         cwd: "/Users/test/long-prompt-test",
-        messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "user",
-            content: longPrompt,
-          },
-        ],
+        messages: [msg("msg1", { role: "user", content: longPrompt })],
       });
 
       const session = await adapter.status("long-prompt-session");
@@ -575,21 +547,20 @@ describe("PiAdapter", () => {
         cwdSlug: "token-test",
         cwd: "/Users/test/token-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "assistant",
             content: "First",
             usage: { input: 100, output: 50, cost: 0.003 },
-          },
-          {
-            type: "message",
-            id: "msg2",
-            parentId: "msg1",
-            role: "assistant",
-            content: "Second",
-            usage: { input: 200, output: 100, cost: 0.006 },
-          },
+          }),
+          msg(
+            "msg2",
+            {
+              role: "assistant",
+              content: "Second",
+              usage: { input: 200, output: 100, cost: 0.006 },
+            },
+            "msg1",
+          ),
         ],
       });
 
@@ -604,12 +575,7 @@ describe("PiAdapter", () => {
         cwdSlug: "no-usage-test",
         cwd: "/Users/test/no-usage-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
-            role: "assistant",
-            content: "No usage stats",
-          },
+          msg("msg1", { role: "assistant", content: "No usage stats" }),
         ],
       });
 
@@ -624,20 +590,16 @@ describe("PiAdapter", () => {
         cwdSlug: "user-usage-test",
         cwd: "/Users/test/user-usage-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "user",
             content: "question",
             usage: { input: 1000, output: 0, cost: 0.1 },
-          },
-          {
-            type: "message",
-            id: "msg2",
+          }),
+          msg("msg2", {
             role: "assistant",
             content: "answer",
             usage: { input: 50, output: 25, cost: 0.002 },
-          },
+          }),
         ],
       });
 
@@ -667,24 +629,20 @@ describe("PiAdapter", () => {
         cwd: "/Users/test/model-change-test",
         modelId: "claude-sonnet-4-5-20250929",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "assistant",
             content: "Initial response",
             usage: { input: 50, output: 20 },
-          },
+          }),
           {
             type: "model_change",
             modelId: "claude-opus-4-6",
           },
-          {
-            type: "message",
-            id: "msg2",
+          msg("msg2", {
             role: "assistant",
             content: "After model change",
             usage: { input: 100, output: 50 },
-          },
+          }),
         ],
       });
 
@@ -1105,13 +1063,11 @@ describe("PiAdapter", () => {
         cwdSlug: "pi-complete-test",
         cwd: "/Users/test/pi-complete-test",
         messages: [
-          {
-            type: "message",
-            id: "msg1",
+          msg("msg1", {
             role: "assistant",
             content: "All done!",
             usage: { input: 100, output: 20 },
-          },
+          }),
         ],
       });
 
@@ -1331,8 +1287,8 @@ describe("PiAdapter", () => {
         "not valid json {{{",
         JSON.stringify({
           type: "message",
-          role: "assistant",
-          content: "Still works",
+          id: "msg1",
+          message: { role: "assistant", content: "Still works" },
         }),
       ];
       await fs.writeFile(
@@ -1368,13 +1324,11 @@ describe("PiAdapter", () => {
           cwdSlug: `concurrent-project-${i}`,
           cwd: `/Users/test/concurrent-project-${i}`,
           messages: [
-            {
-              type: "message",
-              id: "msg1",
+            msg("msg1", {
               role: "assistant",
               content: `Response from session ${i}`,
               usage: { input: 10 * i, output: 5 * i },
-            },
+            }),
           ],
         });
       }

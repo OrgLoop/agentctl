@@ -215,11 +215,14 @@ program
     const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
-      const sessions = await client.call<SessionRecord[]>("session.list", {
+      let sessions = await client.call<SessionRecord[]>("session.list", {
         status: opts.status,
         all: opts.all,
         adapter: opts.adapter,
       });
+      if (opts.adapter) {
+        sessions = sessions.filter((s) => s.adapter === opts.adapter);
+      }
       if (opts.json) {
         printJson(sessions);
       } else {
