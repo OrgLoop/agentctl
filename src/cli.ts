@@ -216,6 +216,7 @@ program
       const sessions = await client.call<SessionRecord[]>("session.list", {
         status: opts.status,
         all: opts.all,
+        adapter: opts.adapter,
       });
       if (opts.json) {
         printJson(sessions);

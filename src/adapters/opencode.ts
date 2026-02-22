@@ -59,8 +59,8 @@ export interface OpenCodeSessionFile {
   directory?: string;
   title?: string;
   time?: {
-    created?: string;
-    updated?: string;
+    created?: number | string;
+    updated?: number | string;
   };
   summary?: {
     additions?: number;
@@ -75,8 +75,8 @@ export interface OpenCodeMessageFile {
   sessionID?: string;
   role?: "user" | "assistant";
   time?: {
-    created?: string;
-    completed?: string;
+    created?: number | string;
+    completed?: number | string;
   };
   agent?: string;
   model?: {
@@ -94,6 +94,12 @@ export interface OpenCodeMessageFile {
   };
   cost?: number;
   finish?: string;
+  error?: {
+    name?: string;
+    data?: { message?: string };
+  };
+  modelID?: string;
+  providerID?: string;
 }
 
 export interface OpenCodeAdapterOpts {
@@ -201,7 +207,11 @@ export class OpenCodeAdapter implements AgentAdapter {
       if (msg.role === "assistant") {
         // Read message content parts
         const text = await this.readMessageParts(msg.id);
-        if (text) assistantMessages.push(text);
+        if (text) {
+          assistantMessages.push(text);
+        } else if (msg.error?.data?.message) {
+          assistantMessages.push(`[error] ${msg.error.data.message}`);
+        }
       }
     }
 
@@ -577,7 +587,8 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     for (const msg of messages) {
       if (msg.role === "assistant") {
-        if (msg.model?.modelID) model = msg.model.modelID;
+        if (msg.modelID) model = msg.modelID;
+        else if (msg.model?.modelID) model = msg.model.modelID;
         if (msg.tokens) {
           totalIn += msg.tokens.input || 0;
           totalOut += msg.tokens.output || 0;

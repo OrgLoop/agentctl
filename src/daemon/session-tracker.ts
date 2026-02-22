@@ -149,7 +149,11 @@ export class SessionTracker {
   }
 
   /** List all tracked sessions */
-  listSessions(opts?: { status?: string; all?: boolean }): SessionRecord[] {
+  listSessions(opts?: {
+    status?: string;
+    all?: boolean;
+    adapter?: string;
+  }): SessionRecord[] {
     const sessions = Object.values(this.state.getSessions());
 
     // Liveness check: mark sessions with dead PIDs as stopped
@@ -164,6 +168,10 @@ export class SessionTracker {
     }
 
     let filtered = sessions;
+
+    if (opts?.adapter) {
+      filtered = filtered.filter((s) => s.adapter === opts.adapter);
+    }
 
     if (opts?.status) {
       filtered = filtered.filter((s) => s.status === opts.status);
