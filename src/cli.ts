@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
+import { PiRustAdapter } from "./adapters/pi-rust.js";
 import { DaemonClient } from "./client/daemon-client.js";
 import type {
   AgentAdapter,
@@ -29,6 +30,7 @@ import { createWorktree, type WorktreeInfo } from "./worktree.js";
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
   openclaw: new OpenClawAdapter(),
+  "pi-rust": new PiRustAdapter(),
 };
 
 const client = new DaemonClient();

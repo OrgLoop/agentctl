@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { ClaudeCodeAdapter } from "../adapters/claude-code.js";
 import { OpenClawAdapter } from "../adapters/openclaw.js";
+import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
 import { migrateLocks } from "../migration/migrate-locks.js";
 import { FuseEngine } from "./fuse-engine.js";
@@ -75,6 +76,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   const adapters: Record<string, AgentAdapter> = opts.adapters || {
     "claude-code": new ClaudeCodeAdapter(),
     openclaw: new OpenClawAdapter(),
+    "pi-rust": new PiRustAdapter(),
   };
 
   const lockManager = new LockManager(state);
