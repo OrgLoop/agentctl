@@ -24,6 +24,7 @@ export interface SessionRecord {
   cost?: number;
   pid?: number;
   exitCode?: number;
+  group?: string; // launch group tag, e.g. "g-a1b2c3"
   meta: Record<string, unknown>;
 }
 

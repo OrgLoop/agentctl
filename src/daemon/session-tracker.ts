@@ -316,6 +316,7 @@ function sessionToRecord(
     tokens: session.tokens,
     cost: session.cost,
     pid: session.pid,
+    group: session.group,
     meta: session.meta,
   };
 }

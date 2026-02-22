@@ -190,6 +190,7 @@ function sessionToJson(s: AgentSession): Record<string, unknown> {
     tokens: s.tokens,
     cost: s.cost,
     pid: s.pid,
+    group: s.group,
     meta: s.meta,
   };
 }
