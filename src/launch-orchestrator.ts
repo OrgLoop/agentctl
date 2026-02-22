@@ -148,8 +148,6 @@ export async function orchestrateLaunch(
   for (const slot of slots) {
     const suffix = slotSuffix(slot, slots);
     const branch = branchName(groupId, suffix);
-    const wtPath = worktreePath(repo, groupId, suffix);
-
     const worktree = await createWorktree({
       repo,
       branch,
@@ -177,56 +175,54 @@ export async function orchestrateLaunch(
   }
 
   // Phase 2: Launch all adapters in parallel
-  const launchPromises = worktrees.map(
-    async ({ slot, suffix, branch, worktree }) => {
-      const adapter = adapters[slot.adapter];
-      if (!adapter) {
-        return {
-          slot,
-          sessionId: "",
-          cwd: worktree.path,
-          branch,
-          error: `Unknown adapter: ${slot.adapter}`,
-        } satisfies SlotLaunchResult;
-      }
+  const launchPromises = worktrees.map(async ({ slot, branch, worktree }) => {
+    const adapter = adapters[slot.adapter];
+    if (!adapter) {
+      return {
+        slot,
+        sessionId: "",
+        cwd: worktree.path,
+        branch,
+        error: `Unknown adapter: ${slot.adapter}`,
+      } satisfies SlotLaunchResult;
+    }
 
-      try {
-        const launchOpts: LaunchOpts = {
-          adapter: slot.adapter,
-          prompt,
-          spec,
-          cwd: worktree.path,
-          model: slot.model,
-          worktree: { repo: worktree.repo, branch },
-          hooks,
-        };
+    try {
+      const launchOpts: LaunchOpts = {
+        adapter: slot.adapter,
+        prompt,
+        spec,
+        cwd: worktree.path,
+        model: slot.model,
+        worktree: { repo: worktree.repo, branch },
+        hooks,
+      };
 
-        const session = await adapter.launch(launchOpts);
+      const session = await adapter.launch(launchOpts);
 
-        // Tag the session with the group
-        session.group = groupId;
+      // Tag the session with the group
+      session.group = groupId;
 
-        const result: SlotLaunchResult = {
-          slot,
-          sessionId: session.id,
-          pid: session.pid,
-          cwd: worktree.path,
-          branch,
-        };
+      const result: SlotLaunchResult = {
+        slot,
+        sessionId: session.id,
+        pid: session.pid,
+        cwd: worktree.path,
+        branch,
+      };
 
-        opts.onSessionLaunched?.(result);
-        return result;
-      } catch (err) {
-        return {
-          slot,
-          sessionId: "",
-          cwd: worktree.path,
-          branch,
-          error: (err as Error).message,
-        } satisfies SlotLaunchResult;
-      }
-    },
-  );
+      opts.onSessionLaunched?.(result);
+      return result;
+    } catch (err) {
+      return {
+        slot,
+        sessionId: "",
+        cwd: worktree.path,
+        branch,
+        error: (err as Error).message,
+      } satisfies SlotLaunchResult;
+    }
+  });
 
   const results = await Promise.all(launchPromises);
   return { groupId, results };

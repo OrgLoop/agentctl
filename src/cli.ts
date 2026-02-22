@@ -476,7 +476,7 @@ program
   .option("--pre-merge <script>", "Hook: run before merge")
   .option("--post-merge <script>", "Hook: run after merge")
   .allowUnknownOption() // Allow interleaved --adapter/--model for parseAdapterSlots
-  .action(async (adapterName: string | undefined, opts, cmd) => {
+  .action(async (adapterName: string | undefined, opts) => {
     let cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
 
     // Collect hooks
@@ -838,10 +838,7 @@ worktreeCmd
     // Auto-detect repo from the worktree's .git file
     if (!repo) {
       try {
-        const gitFile = await fs.readFile(
-          path.join(absPath, ".git"),
-          "utf-8",
-        );
+        const gitFile = await fs.readFile(path.join(absPath, ".git"), "utf-8");
         // .git file contains: gitdir: /path/to/repo/.git/worktrees/<name>
         const match = gitFile.match(/gitdir:\s*(.+)/);
         if (match) {

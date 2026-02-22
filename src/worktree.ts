@@ -106,7 +106,9 @@ export interface WorktreeListEntry {
  * List all git worktrees for a repo.
  * Parses `git worktree list --porcelain` output.
  */
-export async function listWorktrees(repo: string): Promise<WorktreeListEntry[]> {
+export async function listWorktrees(
+  repo: string,
+): Promise<WorktreeListEntry[]> {
   const repoResolved = path.resolve(repo);
   const { stdout } = await execFileAsync(
     "git",

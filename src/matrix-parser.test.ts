@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { expandMatrix, parseMatrixFile, type MatrixFile } from "./matrix-parser.js";
+import {
+  expandMatrix,
+  type MatrixFile,
+  parseMatrixFile,
+} from "./matrix-parser.js";
 
 let tmpDir: string;
 
@@ -117,10 +121,7 @@ describe("expandMatrix", () => {
   it("expands simple entries to single slots", () => {
     const matrix: MatrixFile = {
       prompt: "test",
-      matrix: [
-        { adapter: "claude-code", model: "opus" },
-        { adapter: "codex" },
-      ],
+      matrix: [{ adapter: "claude-code", model: "opus" }, { adapter: "codex" }],
     };
 
     const slots = expandMatrix(matrix);

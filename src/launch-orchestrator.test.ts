@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  type AdapterSlot,
   branchName,
   generateGroupId,
   parseAdapterSlots,
   slotSuffix,
-  type AdapterSlot,
 } from "./launch-orchestrator.js";
 
 describe("generateGroupId", () => {
@@ -139,10 +139,7 @@ describe("parseAdapterSlots", () => {
       "--adapter",
       "codex",
     ]);
-    expect(slots).toEqual([
-      { adapter: "claude-code" },
-      { adapter: "codex" },
-    ]);
+    expect(slots).toEqual([{ adapter: "claude-code" }, { adapter: "codex" }]);
   });
 
   it("throws when --model appears before --adapter", () => {
