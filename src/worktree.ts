@@ -92,3 +92,95 @@ export async function removeWorktree(
     cwd: repoResolved,
   });
 }
+
+/** Info about an existing worktree from `git worktree list` */
+export interface WorktreeListEntry {
+  path: string;
+  branch: string;
+  head: string;
+  /** Whether this is the bare/main worktree */
+  bare: boolean;
+}
+
+/**
+ * List all git worktrees for a repo.
+ * Parses `git worktree list --porcelain` output.
+ */
+export async function listWorktrees(repo: string): Promise<WorktreeListEntry[]> {
+  const repoResolved = path.resolve(repo);
+  const { stdout } = await execFileAsync(
+    "git",
+    ["worktree", "list", "--porcelain"],
+    { cwd: repoResolved },
+  );
+
+  const entries: WorktreeListEntry[] = [];
+  let current: Partial<WorktreeListEntry> = {};
+
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (current.path) entries.push(current as WorktreeListEntry);
+      current = { path: line.replace("worktree ", ""), bare: false };
+    } else if (line.startsWith("HEAD ")) {
+      current.head = line.replace("HEAD ", "");
+    } else if (line.startsWith("branch ")) {
+      current.branch = line.replace("branch refs/heads/", "");
+    } else if (line === "bare") {
+      current.bare = true;
+    } else if (line === "" && current.path) {
+      // End of entry
+    }
+  }
+
+  if (current.path) entries.push(current as WorktreeListEntry);
+
+  return entries;
+}
+
+/**
+ * Remove a worktree and optionally delete its branch.
+ */
+export async function cleanWorktree(
+  repo: string,
+  worktreePath: string,
+  opts?: { deleteBranch?: boolean },
+): Promise<{ removedPath: string; deletedBranch?: string }> {
+  const repoResolved = path.resolve(repo);
+
+  // Get the branch name before removing
+  let branch: string | undefined;
+  if (opts?.deleteBranch) {
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        { cwd: worktreePath },
+      );
+      branch = stdout.trim();
+    } catch {
+      // Worktree might be broken — still try to remove
+    }
+  }
+
+  await execFileAsync("git", ["worktree", "remove", "--force", worktreePath], {
+    cwd: repoResolved,
+  });
+
+  const result: { removedPath: string; deletedBranch?: string } = {
+    removedPath: worktreePath,
+  };
+
+  // Delete the branch if requested
+  if (branch && opts?.deleteBranch) {
+    try {
+      await execFileAsync("git", ["branch", "-D", branch], {
+        cwd: repoResolved,
+      });
+      result.deletedBranch = branch;
+    } catch {
+      // Branch might already be gone
+    }
+  }
+
+  return result;
+}

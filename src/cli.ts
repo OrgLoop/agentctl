@@ -779,6 +779,103 @@ program
     }
   });
 
+// --- Worktree subcommand ---
+
+const worktreeCmd = new Command("worktree").description(
+  "Manage agentctl-created worktrees",
+);
+
+worktreeCmd
+  .command("list")
+  .description("List git worktrees for a repo")
+  .argument("<repo>", "Path to the main repo")
+  .option("--json", "Output as JSON")
+  .action(async (repo: string, opts) => {
+    const { listWorktrees } = await import("./worktree.js");
+
+    try {
+      const entries = await listWorktrees(repo);
+      // Filter to only non-bare worktrees (exclude the main worktree)
+      const worktrees = entries.filter((e) => !e.bare);
+
+      if (opts.json) {
+        printJson(worktrees);
+        return;
+      }
+
+      if (worktrees.length === 0) {
+        console.log("No worktrees found.");
+        return;
+      }
+
+      printTable(
+        worktrees.map((e) => ({
+          Path: shortenPath(e.path),
+          Branch: e.branch || "-",
+          HEAD: e.head?.slice(0, 8) || "-",
+        })),
+      );
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+worktreeCmd
+  .command("clean")
+  .description("Remove a worktree and optionally its branch")
+  .argument("<path>", "Path to the worktree to remove")
+  .option("--repo <path>", "Main repo path (auto-detected if omitted)")
+  .option("--delete-branch", "Also delete the worktree's branch")
+  .action(async (worktreePath: string, opts) => {
+    const { cleanWorktree } = await import("./worktree.js");
+
+    const absPath = path.resolve(worktreePath);
+    let repo = opts.repo;
+
+    // Auto-detect repo from the worktree's .git file
+    if (!repo) {
+      try {
+        const gitFile = await fs.readFile(
+          path.join(absPath, ".git"),
+          "utf-8",
+        );
+        // .git file contains: gitdir: /path/to/repo/.git/worktrees/<name>
+        const match = gitFile.match(/gitdir:\s*(.+)/);
+        if (match) {
+          const gitDir = match[1].trim();
+          // Navigate up from .git/worktrees/<name> to the repo root
+          repo = path.resolve(gitDir, "..", "..", "..");
+        }
+      } catch {
+        console.error(
+          "Cannot auto-detect repo. Use --repo to specify the main repository.",
+        );
+        process.exit(1);
+      }
+    }
+
+    if (!repo) {
+      console.error("Cannot determine repo path. Use --repo.");
+      process.exit(1);
+    }
+
+    try {
+      const result = await cleanWorktree(repo, absPath, {
+        deleteBranch: opts.deleteBranch,
+      });
+      console.log(`Removed worktree: ${shortenPath(result.removedPath)}`);
+      if (result.deletedBranch) {
+        console.log(`Deleted branch: ${result.deletedBranch}`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+program.addCommand(worktreeCmd);
+
 // --- Lock commands ---
 
 program
