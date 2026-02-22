@@ -74,6 +74,26 @@ describe("runHook", () => {
     expect(result?.stdout.trim()).toBe("0");
   });
 
+  it("passes group via env var", async () => {
+    const hooks: LifecycleHooks = { onCreate: "echo $AGENTCTL_GROUP" };
+    const result = await runHook(hooks, "onCreate", {
+      ...defaultCtx,
+      cwd: tmpDir,
+      group: "g-abc123",
+    });
+    expect(result?.stdout.trim()).toBe("g-abc123");
+  });
+
+  it("passes model via env var", async () => {
+    const hooks: LifecycleHooks = { onCreate: "echo $AGENTCTL_MODEL" };
+    const result = await runHook(hooks, "onCreate", {
+      ...defaultCtx,
+      cwd: tmpDir,
+      model: "claude-opus-4-6",
+    });
+    expect(result?.stdout.trim()).toBe("claude-opus-4-6");
+  });
+
   it("handles hook script failures gracefully", async () => {
     const hooks: LifecycleHooks = { onCreate: "exit 1" };
     const result = await runHook(hooks, "onCreate", {
