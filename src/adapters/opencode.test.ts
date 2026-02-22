@@ -3,9 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  OpenCodeAdapter,
   computeProjectHash,
   type LaunchedSessionMeta,
+  OpenCodeAdapter,
   type OpenCodeMessageFile,
   type OpenCodeSessionFile,
   type PidInfo,
@@ -83,7 +83,9 @@ async function createFakeSession(
   }
 }
 
-function makeSession(overrides: Partial<OpenCodeSessionFile> = {}): OpenCodeSessionFile {
+function makeSession(
+  overrides: Partial<OpenCodeSessionFile> = {},
+): OpenCodeSessionFile {
   const now = new Date();
   return {
     id: overrides.id || "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -100,7 +102,9 @@ function makeSession(overrides: Partial<OpenCodeSessionFile> = {}): OpenCodeSess
   };
 }
 
-function makeMessage(overrides: Partial<OpenCodeMessageFile> = {}): OpenCodeMessageFile {
+function makeMessage(
+  overrides: Partial<OpenCodeMessageFile> = {},
+): OpenCodeMessageFile {
   return {
     id: overrides.id || "msg-001",
     sessionID: overrides.sessionID || "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -110,7 +114,10 @@ function makeMessage(overrides: Partial<OpenCodeMessageFile> = {}): OpenCodeMess
       completed: new Date().toISOString(),
     },
     agent: overrides.agent || "default",
-    model: overrides.model || { providerID: "anthropic", modelID: "claude-sonnet-4-5-20250929" },
+    model: overrides.model || {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-5-20250929",
+    },
     tokens: overrides.tokens || { input: 100, output: 50, reasoning: 0 },
     cache: overrides.cache || { read: 0, write: 0 },
     cost: overrides.cost ?? 0.003,
@@ -167,7 +174,7 @@ describe("OpenCodeAdapter", () => {
         model: { providerID: "anthropic", modelID: "claude-opus-4-6" },
       });
 
-      await createFakeSession(session.directory!, session, [msg]);
+      await createFakeSession(session.directory || "", session, [msg]);
 
       const sessions = await adapter.list({ all: true });
       expect(sessions).toHaveLength(1);
@@ -179,7 +186,7 @@ describe("OpenCodeAdapter", () => {
 
     it("filters by status", async () => {
       const session = makeSession();
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const running = await adapter.list({ status: "running" });
       expect(running).toHaveLength(0);
@@ -190,7 +197,7 @@ describe("OpenCodeAdapter", () => {
 
     it("default list (no opts) only shows running sessions", async () => {
       const session = makeSession();
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const sessions = await adapter.list();
       expect(sessions).toHaveLength(0);
@@ -205,7 +212,7 @@ describe("OpenCodeAdapter", () => {
         },
       });
 
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       // With --all, old sessions are included
       const withAll = await adapter.list({ all: true });
@@ -279,7 +286,7 @@ describe("OpenCodeAdapter", () => {
         version: "2.0.0",
         summary: { additions: 25, deletions: 10, files: 5 },
       });
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const sessions = await adapter.list({ all: true });
       expect(sessions).toHaveLength(1);
@@ -317,7 +324,7 @@ describe("OpenCodeAdapter", () => {
       await fs.writeFile(path.join(sessionDir, "not-a-dir.txt"), "hello");
 
       const session = makeSession();
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const sessions = await adapter.list({ all: true });
       expect(sessions).toHaveLength(1);
@@ -331,22 +338,39 @@ describe("OpenCodeAdapter", () => {
       const msg2 = makeMessage({
         id: "msg-asst-001",
         role: "assistant",
-        time: { created: "2026-02-20T10:01:00Z", completed: "2026-02-20T10:01:30Z" },
+        time: {
+          created: "2026-02-20T10:01:00Z",
+          completed: "2026-02-20T10:01:30Z",
+        },
       });
       const msg3 = makeMessage({
         id: "msg-asst-002",
         role: "assistant",
-        time: { created: "2026-02-20T10:02:00Z", completed: "2026-02-20T10:02:30Z" },
+        time: {
+          created: "2026-02-20T10:02:00Z",
+          completed: "2026-02-20T10:02:30Z",
+        },
       });
 
-      await createFakeSession(session.directory!, session, [msg1, msg2, msg3], {
-        "msg-asst-001": [
-          { file: "part-001.json", content: JSON.stringify({ text: "First assistant response." }) },
-        ],
-        "msg-asst-002": [
-          { file: "part-001.json", content: JSON.stringify({ text: "Second assistant response." }) },
-        ],
-      });
+      await createFakeSession(
+        session.directory || "",
+        session,
+        [msg1, msg2, msg3],
+        {
+          "msg-asst-001": [
+            {
+              file: "part-001.json",
+              content: JSON.stringify({ text: "First assistant response." }),
+            },
+          ],
+          "msg-asst-002": [
+            {
+              file: "part-001.json",
+              content: JSON.stringify({ text: "Second assistant response." }),
+            },
+          ],
+        },
+      );
 
       const output = await adapter.peek(session.id);
       expect(output).toContain("First assistant response.");
@@ -356,7 +380,10 @@ describe("OpenCodeAdapter", () => {
     it("respects line limit", async () => {
       const session = makeSession();
       const messages: OpenCodeMessageFile[] = [];
-      const parts: Record<string, Array<{ file: string; content: string }>> = {};
+      const parts: Record<
+        string,
+        Array<{ file: string; content: string }>
+      > = {};
 
       for (let i = 0; i < 10; i++) {
         const msgId = `msg-asst-${i.toString().padStart(3, "0")}`;
@@ -371,11 +398,19 @@ describe("OpenCodeAdapter", () => {
           }),
         );
         parts[msgId] = [
-          { file: "part-001.json", content: JSON.stringify({ text: `Message ${i}` }) },
+          {
+            file: "part-001.json",
+            content: JSON.stringify({ text: `Message ${i}` }),
+          },
         ];
       }
 
-      await createFakeSession(session.directory!, session, messages, parts);
+      await createFakeSession(
+        session.directory || "",
+        session,
+        messages,
+        parts,
+      );
 
       const output = await adapter.peek(session.id, { lines: 3 });
       expect(output).toContain("Message 7");
@@ -396,9 +431,12 @@ describe("OpenCodeAdapter", () => {
       });
       const msg = makeMessage({ id: "msg-prefix-001", role: "assistant" });
 
-      await createFakeSession(session.directory!, session, [msg], {
+      await createFakeSession(session.directory || "", session, [msg], {
         "msg-prefix-001": [
-          { file: "part-001.json", content: JSON.stringify({ text: "Found by prefix!" }) },
+          {
+            file: "part-001.json",
+            content: JSON.stringify({ text: "Found by prefix!" }),
+          },
         ],
       });
 
@@ -408,7 +446,7 @@ describe("OpenCodeAdapter", () => {
 
     it("handles sessions with no messages", async () => {
       const session = makeSession();
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const output = await adapter.peek(session.id);
       expect(output).toBe("");
@@ -418,7 +456,7 @@ describe("OpenCodeAdapter", () => {
       const session = makeSession();
       const msg = makeMessage({ id: "msg-no-parts", role: "assistant" });
 
-      await createFakeSession(session.directory!, session, [msg]);
+      await createFakeSession(session.directory || "", session, [msg]);
 
       const output = await adapter.peek(session.id);
       // No parts dir exists — should return empty for this message
@@ -429,7 +467,7 @@ describe("OpenCodeAdapter", () => {
       const session = makeSession();
       const msg = makeMessage({ id: "msg-raw-001", role: "assistant" });
 
-      await createFakeSession(session.directory!, session, [msg], {
+      await createFakeSession(session.directory || "", session, [msg], {
         "msg-raw-001": [
           { file: "part-001.txt", content: "Raw text content here" },
         ],
@@ -443,9 +481,12 @@ describe("OpenCodeAdapter", () => {
       const session = makeSession();
       const msg = makeMessage({ id: "msg-content-001", role: "assistant" });
 
-      await createFakeSession(session.directory!, session, [msg], {
+      await createFakeSession(session.directory || "", session, [msg], {
         "msg-content-001": [
-          { file: "part-001.json", content: JSON.stringify({ content: "Content field text" }) },
+          {
+            file: "part-001.json",
+            content: JSON.stringify({ content: "Content field text" }),
+          },
         ],
       });
 
@@ -460,12 +501,15 @@ describe("OpenCodeAdapter", () => {
         title: "Status check session",
       });
       const msg = makeMessage({
-        model: { providerID: "anthropic", modelID: "claude-sonnet-4-5-20250929" },
+        model: {
+          providerID: "anthropic",
+          modelID: "claude-sonnet-4-5-20250929",
+        },
         tokens: { input: 500, output: 200, reasoning: 0 },
         cost: 0.01,
       });
 
-      await createFakeSession(session.directory!, session, [msg]);
+      await createFakeSession(session.directory || "", session, [msg]);
 
       const result = await adapter.status(session.id);
       expect(result.id).toBe(session.id);
@@ -488,7 +532,7 @@ describe("OpenCodeAdapter", () => {
       const session = makeSession({
         id: "abcdef99-1111-2222-3333-444444444444",
       });
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const result = await adapter.status("abcdef99");
       expect(result.id).toBe("abcdef99-1111-2222-3333-444444444444");
@@ -506,10 +550,10 @@ describe("OpenCodeAdapter", () => {
       const msg2 = makeMessage({
         id: "msg-tok-002",
         tokens: { input: 200, output: 100, reasoning: 20 },
-        cost: 0.010,
+        cost: 0.01,
       });
 
-      await createFakeSession(session.directory!, session, [msg1, msg2]);
+      await createFakeSession(session.directory || "", session, [msg1, msg2]);
 
       const result = await adapter.status(session.id);
       expect(result.tokens).toEqual({ in: 300, out: 150 });
@@ -531,7 +575,7 @@ describe("OpenCodeAdapter", () => {
         }),
       );
 
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const result = await adapter.status(session.id);
       expect(result.tokens).toBeUndefined();
@@ -542,16 +586,25 @@ describe("OpenCodeAdapter", () => {
       const session = makeSession();
       const msg1 = makeMessage({
         id: "msg-model-001",
-        model: { providerID: "anthropic", modelID: "claude-sonnet-4-5-20250929" },
-        time: { created: "2026-02-20T10:00:00Z", completed: "2026-02-20T10:00:30Z" },
+        model: {
+          providerID: "anthropic",
+          modelID: "claude-sonnet-4-5-20250929",
+        },
+        time: {
+          created: "2026-02-20T10:00:00Z",
+          completed: "2026-02-20T10:00:30Z",
+        },
       });
       const msg2 = makeMessage({
         id: "msg-model-002",
         model: { providerID: "anthropic", modelID: "claude-opus-4-6" },
-        time: { created: "2026-02-20T10:01:00Z", completed: "2026-02-20T10:01:30Z" },
+        time: {
+          created: "2026-02-20T10:01:00Z",
+          completed: "2026-02-20T10:01:30Z",
+        },
       });
 
-      await createFakeSession(session.directory!, session, [msg1, msg2]);
+      await createFakeSession(session.directory || "", session, [msg1, msg2]);
 
       const result = await adapter.status(session.id);
       expect(result.model).toBe("claude-opus-4-6");
@@ -572,7 +625,10 @@ describe("OpenCodeAdapter", () => {
         cost: 0.003,
       });
 
-      await createFakeSession(session.directory!, session, [userMsg, assistantMsg]);
+      await createFakeSession(session.directory || "", session, [
+        userMsg,
+        assistantMsg,
+      ]);
 
       const result = await adapter.status(session.id);
       expect(result.tokens).toEqual({ in: 100, out: 50 });
@@ -1071,30 +1127,53 @@ describe("OpenCodeAdapter", () => {
       const msg1 = makeMessage({
         id: "msg-sort-003",
         role: "assistant",
-        time: { created: "2026-02-20T10:03:00Z", completed: "2026-02-20T10:03:30Z" },
+        time: {
+          created: "2026-02-20T10:03:00Z",
+          completed: "2026-02-20T10:03:30Z",
+        },
       });
       const msg2 = makeMessage({
         id: "msg-sort-001",
         role: "assistant",
-        time: { created: "2026-02-20T10:01:00Z", completed: "2026-02-20T10:01:30Z" },
+        time: {
+          created: "2026-02-20T10:01:00Z",
+          completed: "2026-02-20T10:01:30Z",
+        },
       });
       const msg3 = makeMessage({
         id: "msg-sort-002",
         role: "assistant",
-        time: { created: "2026-02-20T10:02:00Z", completed: "2026-02-20T10:02:30Z" },
+        time: {
+          created: "2026-02-20T10:02:00Z",
+          completed: "2026-02-20T10:02:30Z",
+        },
       });
 
-      await createFakeSession(session.directory!, session, [msg1, msg2, msg3], {
-        "msg-sort-001": [
-          { file: "part-001.json", content: JSON.stringify({ text: "First" }) },
-        ],
-        "msg-sort-002": [
-          { file: "part-001.json", content: JSON.stringify({ text: "Second" }) },
-        ],
-        "msg-sort-003": [
-          { file: "part-001.json", content: JSON.stringify({ text: "Third" }) },
-        ],
-      });
+      await createFakeSession(
+        session.directory || "",
+        session,
+        [msg1, msg2, msg3],
+        {
+          "msg-sort-001": [
+            {
+              file: "part-001.json",
+              content: JSON.stringify({ text: "First" }),
+            },
+          ],
+          "msg-sort-002": [
+            {
+              file: "part-001.json",
+              content: JSON.stringify({ text: "Second" }),
+            },
+          ],
+          "msg-sort-003": [
+            {
+              file: "part-001.json",
+              content: JSON.stringify({ text: "Third" }),
+            },
+          ],
+        },
+      );
 
       const output = await adapter.peek(session.id);
       const parts = output.split("\n---\n");
@@ -1121,7 +1200,7 @@ describe("OpenCodeAdapter", () => {
         ),
       );
 
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const result = await adapter.status(session.id);
       expect(result.tokens).toEqual({ in: 50, out: 25 });
@@ -1132,7 +1211,7 @@ describe("OpenCodeAdapter", () => {
       const msgDir = path.join(messageDir, session.id);
       await fs.mkdir(msgDir, { recursive: true });
 
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const result = await adapter.status(session.id);
       expect(result.tokens).toBeUndefined();
@@ -1162,7 +1241,10 @@ describe("OpenCodeAdapter", () => {
         JSON.stringify({
           id: sessionId,
           title: "No directory session",
-          time: { created: new Date().toISOString(), updated: new Date().toISOString() },
+          time: {
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+          },
         }),
       );
 
@@ -1175,10 +1257,14 @@ describe("OpenCodeAdapter", () => {
     it("sums cost across multiple messages", async () => {
       const session = makeSession();
       const msg1 = makeMessage({ id: "msg-cost-001", cost: 0.005 });
-      const msg2 = makeMessage({ id: "msg-cost-002", cost: 0.010 });
+      const msg2 = makeMessage({ id: "msg-cost-002", cost: 0.01 });
       const msg3 = makeMessage({ id: "msg-cost-003", cost: 0.003 });
 
-      await createFakeSession(session.directory!, session, [msg1, msg2, msg3]);
+      await createFakeSession(session.directory || "", session, [
+        msg1,
+        msg2,
+        msg3,
+      ]);
 
       const result = await adapter.status(session.id);
       expect(result.cost).toBeCloseTo(0.018);
@@ -1188,7 +1274,7 @@ describe("OpenCodeAdapter", () => {
       const session = makeSession();
       const msg = makeMessage({ id: "msg-nocost-001", cost: 0 });
 
-      await createFakeSession(session.directory!, session, [msg]);
+      await createFakeSession(session.directory || "", session, [msg]);
 
       const result = await adapter.status(session.id);
       expect(result.cost).toBeUndefined();
@@ -1198,7 +1284,7 @@ describe("OpenCodeAdapter", () => {
   describe("session title as prompt", () => {
     it("uses session title as prompt", async () => {
       const session = makeSession({ title: "Fix the authentication bug" });
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const result = await adapter.status(session.id);
       expect(result.prompt).toBe("Fix the authentication bug");
@@ -1207,7 +1293,7 @@ describe("OpenCodeAdapter", () => {
     it("truncates long titles", async () => {
       const longTitle = "A".repeat(300);
       const session = makeSession({ title: longTitle });
-      await createFakeSession(session.directory!, session);
+      await createFakeSession(session.directory || "", session);
 
       const result = await adapter.status(session.id);
       expect(result.prompt).toHaveLength(200);
@@ -1224,7 +1310,10 @@ describe("OpenCodeAdapter", () => {
         JSON.stringify({
           id: sessionId,
           directory: dir,
-          time: { created: new Date().toISOString(), updated: new Date().toISOString() },
+          time: {
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+          },
         }),
       );
 

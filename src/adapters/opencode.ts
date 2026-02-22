@@ -563,9 +563,11 @@ export class OpenCodeAdapter implements AgentAdapter {
   /**
    * Read all messages for a session and aggregate stats.
    */
-  private async aggregateMessageStats(
-    sessionId: string,
-  ): Promise<{ model?: string; tokens?: { in: number; out: number }; cost?: number }> {
+  private async aggregateMessageStats(sessionId: string): Promise<{
+    model?: string;
+    tokens?: { in: number; out: number };
+    cost?: number;
+  }> {
     const messages = await this.readMessages(sessionId);
 
     let model: string | undefined;
