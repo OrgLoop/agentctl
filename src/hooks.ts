@@ -12,6 +12,8 @@ export interface HookContext {
   adapter: string;
   branch?: string;
   exitCode?: number;
+  group?: string;
+  model?: string;
 }
 
 /**
@@ -38,6 +40,8 @@ export async function runHook(
 
   if (ctx.branch) env.AGENTCTL_BRANCH = ctx.branch;
   if (ctx.exitCode != null) env.AGENTCTL_EXIT_CODE = String(ctx.exitCode);
+  if (ctx.group) env.AGENTCTL_GROUP = ctx.group;
+  if (ctx.model) env.AGENTCTL_MODEL = ctx.model;
 
   try {
     const result = await execAsync(script, {

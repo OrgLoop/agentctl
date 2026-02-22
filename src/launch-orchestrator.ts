@@ -170,6 +170,8 @@ export async function orchestrateLaunch(
         cwd: worktree.path,
         adapter: slot.adapter,
         branch,
+        group: groupId,
+        model: slot.model,
       });
     }
   }
