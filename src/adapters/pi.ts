@@ -203,7 +203,10 @@ export class PiAdapter implements AgentAdapter {
   }
 
   /** Extract assistant messages from a JSONL session file */
-  private async peekFromJsonl(filePath: string, lines: number): Promise<string> {
+  private async peekFromJsonl(
+    filePath: string,
+    lines: number,
+  ): Promise<string> {
     const content = await fs.readFile(filePath, "utf-8");
     const jsonlLines = content.trim().split("\n");
 
@@ -230,11 +233,16 @@ export class PiAdapter implements AgentAdapter {
   }
 
   /** Get the log file path for a pending session from metadata */
-  private async getLogPathForSession(sessionId: string): Promise<string | null> {
+  private async getLogPathForSession(
+    sessionId: string,
+  ): Promise<string | null> {
     const meta = await this.readSessionMeta(sessionId);
     if (!meta) return null;
     // The log path is stored in the launch metadata directory
-    const logPath = path.join(this.sessionsMetaDir, `launch-${new Date(meta.launchedAt).getTime()}.log`);
+    const logPath = path.join(
+      this.sessionsMetaDir,
+      `launch-${new Date(meta.launchedAt).getTime()}.log`,
+    );
     try {
       await fs.access(logPath);
       return logPath;
