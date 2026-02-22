@@ -25,6 +25,7 @@ npm run lint:fix   # biome check --write
 
 - `src/core/types.ts` — Core interfaces (AgentAdapter, AgentSession, etc.)
 - `src/adapters/claude-code.ts` — Claude Code adapter (reads ~/.claude/, cross-refs PIDs)
+- `src/adapters/codex.ts` — Codex CLI adapter (reads ~/.codex/sessions/, cross-refs PIDs)
 - `src/adapters/openclaw.ts` — OpenClaw gateway adapter (WebSocket RPC)
 - `src/adapters/pi-rust.ts` — Pi Rust adapter (reads ~/.pi/agent/sessions/, cross-refs PIDs)
 - `src/cli.ts` — CLI entry point (commander)

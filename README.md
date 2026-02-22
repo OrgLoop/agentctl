@@ -63,7 +63,7 @@ Session IDs support prefix matching — `agentctl peek abc123` matches any sessi
 
 ```bash
 agentctl list [options]
-  --adapter <name>     Filter by adapter (claude-code, openclaw)
+  --adapter <name>     Filter by adapter (claude-code, codex, openclaw)
   --status <status>    Filter by status (running|stopped|idle|error)
   -a, --all            Include stopped sessions (last 7 days)
   --json               Output as JSON
@@ -278,6 +278,18 @@ agentctl uses an adapter model to support different agent runtimes.
 
 Reads session data from `~/.claude/projects/` and cross-references with running `claude` processes. Detects PID recycling via process start time verification. Tracks detached processes that survive wrapper exit.
 
+### Codex CLI
+
+Reads session data from `~/.codex/sessions/` and cross-references with running `codex` processes. Supports `codex exec` non-interactive mode for launching headless sessions. Detects PID recycling via process start time verification, same as the Claude Code adapter.
+
+```bash
+# Launch a Codex session
+agentctl launch codex -p "implement the feature"
+
+# Launch with specific model
+agentctl launch codex -p "fix the bug" --model gpt-5.2-codex
+```
+
 ### OpenClaw
 
 Connects to the OpenClaw gateway via WebSocket RPC. Read-only — sessions are managed through the gateway.
@@ -340,6 +352,7 @@ src/
   cli.ts                         # CLI entry point (commander)
   core/types.ts                  # Core interfaces
   adapters/claude-code.ts        # Claude Code adapter
+  adapters/codex.ts              # Codex CLI adapter
   adapters/openclaw.ts           # OpenClaw gateway adapter
   daemon/server.ts               # Daemon: Unix socket server + HTTP metrics
   daemon/session-tracker.ts      # Session lifecycle tracking
