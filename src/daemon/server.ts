@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { ClaudeCodeAdapter } from "../adapters/claude-code.js";
 import { OpenClawAdapter } from "../adapters/openclaw.js";
+import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
 import { migrateLocks } from "../migration/migrate-locks.js";
 import { FuseEngine } from "./fuse-engine.js";
@@ -75,6 +76,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   const adapters: Record<string, AgentAdapter> = opts.adapters || {
     "claude-code": new ClaudeCodeAdapter(),
     openclaw: new OpenClawAdapter(),
+    "pi-rust": new PiRustAdapter(),
   };
 
   const lockManager = new LockManager(state);
@@ -229,10 +231,15 @@ function createRequestHandler(ctx: HandlerContext) {
       }
 
       case "session.peek": {
-        const adapterName = (params.adapter as string) || "claude-code";
+        // Auto-detect adapter from tracked session, fall back to param or claude-code
+        const tracked = ctx.sessionTracker.getSession(params.id as string);
+        const adapterName =
+          (params.adapter as string) || tracked?.adapter || "claude-code";
         const adapter = ctx.adapters[adapterName];
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
-        return adapter.peek(params.id as string, {
+        // Use the full session ID if we resolved it from the tracker
+        const peekId = tracked?.id || (params.id as string);
+        return adapter.peek(peekId, {
           lines: params.lines as number | undefined,
         });
       }

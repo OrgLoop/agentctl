@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
+import { PiRustAdapter } from "./adapters/pi-rust.js";
 import { DaemonClient } from "./client/daemon-client.js";
 import type {
   AgentAdapter,
@@ -29,6 +30,7 @@ import { createWorktree, type WorktreeInfo } from "./worktree.js";
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
   openclaw: new OpenClawAdapter(),
+  "pi-rust": new PiRustAdapter(),
 };
 
 const client = new DaemonClient();
@@ -36,8 +38,10 @@ const client = new DaemonClient();
 /**
  * Ensure the daemon is running. Auto-starts it if not.
  * Returns true if daemon is available after the call.
+ * Set AGENTCTL_NO_DAEMON=1 to skip daemon and use direct adapter mode.
  */
 async function ensureDaemon(): Promise<boolean> {
+  if (process.env.AGENTCTL_NO_DAEMON === "1") return false;
   if (await client.isRunning()) return true;
 
   // Auto-start daemon in background
@@ -266,33 +270,39 @@ program
           }
         }
         return;
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exit(1);
+      } catch {
+        // Daemon failed — fall through to direct adapter lookup
       }
     }
 
-    // Direct fallback
-    const adapter = getAdapter(opts.adapter);
-    try {
-      const session = await adapter.status(id);
-      if (opts.json) {
-        printJson(sessionToJson(session));
-      } else {
-        const fmt = formatSession(session);
-        for (const [k, v] of Object.entries(fmt)) {
-          console.log(`${k.padEnd(10)} ${v}`);
+    // Direct fallback: try specified adapter, or search all adapters
+    const statusAdapters = opts.adapter
+      ? [getAdapter(opts.adapter)]
+      : getAllAdapters();
+
+    for (const adapter of statusAdapters) {
+      try {
+        const session = await adapter.status(id);
+        if (opts.json) {
+          printJson(sessionToJson(session));
+        } else {
+          const fmt = formatSession(session);
+          for (const [k, v] of Object.entries(fmt)) {
+            console.log(`${k.padEnd(10)} ${v}`);
+          }
+          if (session.tokens) {
+            console.log(
+              `Tokens     in: ${session.tokens.in}, out: ${session.tokens.out}`,
+            );
+          }
         }
-        if (session.tokens) {
-          console.log(
-            `Tokens     in: ${session.tokens.in}, out: ${session.tokens.out}`,
-          );
-        }
+        return;
+      } catch {
+        // Try next adapter
       }
-    } catch (err) {
-      console.error((err as Error).message);
-      process.exit(1);
     }
+    console.error(`Session not found: ${id}`);
+    process.exit(1);
   });
 
 // peek
@@ -312,22 +322,39 @@ program
         });
         console.log(output);
         return;
+      } catch {
+        // Daemon failed — fall through to direct adapter lookup
+      }
+    }
+
+    // Direct fallback: try specified adapter, or search all adapters
+    if (opts.adapter) {
+      const adapter = getAdapter(opts.adapter);
+      try {
+        const output = await adapter.peek(id, {
+          lines: Number.parseInt(opts.lines, 10),
+        });
+        console.log(output);
+        return;
       } catch (err) {
         console.error((err as Error).message);
         process.exit(1);
       }
     }
 
-    const adapter = getAdapter(opts.adapter);
-    try {
-      const output = await adapter.peek(id, {
-        lines: Number.parseInt(opts.lines, 10),
-      });
-      console.log(output);
-    } catch (err) {
-      console.error((err as Error).message);
-      process.exit(1);
+    for (const adapter of getAllAdapters()) {
+      try {
+        const output = await adapter.peek(id, {
+          lines: Number.parseInt(opts.lines, 10),
+        });
+        console.log(output);
+        return;
+      } catch {
+        // Try next adapter
+      }
     }
+    console.error(`Session not found: ${id}`);
+    process.exit(1);
   });
 
 // stop
