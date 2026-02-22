@@ -226,6 +226,7 @@ program
   .description("List agent sessions")
   .option("--adapter <name>", "Filter by adapter")
   .option("--status <status>", "Filter by status (running|stopped|idle|error)")
+  .option("--group <id>", "Filter by launch group (e.g. g-a1b2c3)")
   .option("-a, --all", "Include stopped sessions (last 7 days)")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
@@ -236,6 +237,7 @@ program
         status: opts.status,
         all: opts.all,
         adapter: opts.adapter,
+        group: opts.group,
       });
       if (opts.adapter) {
         sessions = sessions.filter((s) => s.adapter === opts.adapter);

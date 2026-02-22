@@ -224,11 +224,16 @@ function createRequestHandler(ctx: HandlerContext) {
     const params = (req.params || {}) as Record<string, unknown>;
 
     switch (req.method) {
-      case "session.list":
-        return ctx.sessionTracker.listSessions({
+      case "session.list": {
+        let sessions = ctx.sessionTracker.listSessions({
           status: params.status as string | undefined,
           all: params.all as boolean | undefined,
         });
+        if (params.group) {
+          sessions = sessions.filter((s) => s.group === params.group);
+        }
+        return sessions;
+      }
 
       case "session.status": {
         const session = ctx.sessionTracker.getSession(params.id as string);
@@ -287,6 +292,11 @@ function createRequestHandler(ctx: HandlerContext) {
             | Record<string, unknown>
             | undefined,
         });
+
+        // Propagate group tag if provided
+        if (params.group) {
+          session.group = params.group as string;
+        }
 
         const record = ctx.sessionTracker.track(session, adapterName);
 
