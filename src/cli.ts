@@ -977,6 +977,26 @@ program
     }
   });
 
+// --- Prune command (#40) ---
+
+program
+  .command("prune")
+  .description("Remove dead and stale sessions from daemon state")
+  .action(async () => {
+    const daemonRunning = await ensureDaemon();
+    if (!daemonRunning) {
+      console.error("Daemon not running. Start with: agentctl daemon start");
+      process.exit(1);
+    }
+    try {
+      const result = await client.call<{ pruned: number }>("session.prune");
+      console.log(`Pruned ${result.pruned} dead/stale sessions`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
 // --- Daemon subcommand ---
 
 const daemonCmd = new Command("daemon").description(
@@ -1065,8 +1085,9 @@ daemonCmd
 
 daemonCmd
   .command("status")
-  .description("Show daemon status")
+  .description("Show daemon status and all daemon-related processes")
   .action(async () => {
+    // Show daemon status
     try {
       const status = await client.call<DaemonStatus>("daemon.status");
       console.log(`Daemon running (PID ${status.pid})`);
@@ -1076,6 +1097,40 @@ daemonCmd
       console.log(`  Active fuses: ${status.fuses}`);
     } catch {
       console.log("Daemon not running");
+    }
+
+    // Show all daemon-related processes (#39)
+    const configDir = path.join(os.homedir(), ".agentctl");
+    const { getSupervisorPid } = await import("./daemon/supervisor.js");
+    const supPid = await getSupervisorPid();
+
+    let daemonPid: number | null = null;
+    try {
+      const raw = await fs.readFile(
+        path.join(configDir, "agentctl.pid"),
+        "utf-8",
+      );
+      const pid = Number.parseInt(raw.trim(), 10);
+      try {
+        process.kill(pid, 0);
+        daemonPid = pid;
+      } catch {
+        // PID file is stale
+      }
+    } catch {
+      // No PID file
+    }
+
+    console.log("\nDaemon-related processes:");
+    if (supPid) {
+      console.log(`  Supervisor: PID ${supPid} (alive)`);
+    } else {
+      console.log("  Supervisor: not running");
+    }
+    if (daemonPid) {
+      console.log(`  Daemon: PID ${daemonPid} (alive)`);
+    } else {
+      console.log("  Daemon: not running");
     }
   });
 

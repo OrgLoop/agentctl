@@ -14,6 +14,8 @@ import type {
   PeekOpts,
   StopOpts,
 } from "../core/types.js";
+import { buildSpawnEnv } from "../utils/daemon-env.js";
+import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -246,7 +248,7 @@ export class PiRustAdapter implements AgentAdapter {
       args.unshift("--model", opts.model);
     }
 
-    const env = { ...process.env, ...opts.env };
+    const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID
@@ -254,11 +256,16 @@ export class PiRustAdapter implements AgentAdapter {
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const child = spawn("pi-rust", args, {
+    const piRustPath = await resolveBinaryPath("pi-rust");
+    const child = spawn(piRustPath, args, {
       cwd,
       env,
       stdio: ["ignore", logFd.fd, "ignore"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[pi-rust] spawn error: ${err.message}`);
     });
 
     child.unref();
@@ -383,10 +390,15 @@ export class PiRustAdapter implements AgentAdapter {
       args.unshift("--continue");
     }
 
-    const child = spawn("pi-rust", args, {
+    const piRustPath = await resolveBinaryPath("pi-rust");
+    const child = spawn(piRustPath, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[pi-rust] resume spawn error: ${err.message}`);
     });
 
     child.unref();

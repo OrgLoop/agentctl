@@ -14,6 +14,8 @@ import type {
   PeekOpts,
   StopOpts,
 } from "../core/types.js";
+import { buildSpawnEnv } from "../utils/daemon-env.js";
+import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -231,16 +233,21 @@ export class OpenCodeAdapter implements AgentAdapter {
   async launch(opts: LaunchOpts): Promise<AgentSession> {
     const args = ["run", opts.prompt];
 
-    const env = { ...process.env, ...opts.env };
+    const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
 
-    const child = spawn("opencode", args, {
+    const opencodePath = await resolveBinaryPath("opencode");
+    const child = spawn(opencodePath, args, {
       cwd,
       env,
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[opencode] spawn error: ${err.message}`);
     });
 
     child.unref();
@@ -308,10 +315,15 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     const cwd = resolved.directory || process.cwd();
 
-    const child = spawn("opencode", ["run", message], {
+    const opencodePath = await resolveBinaryPath("opencode");
+    const child = spawn(opencodePath, ["run", message], {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[opencode] resume spawn error: ${err.message}`);
     });
 
     child.unref();
