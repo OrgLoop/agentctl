@@ -1,7 +1,7 @@
 # ADR-002: Discover-First Session Tracking
 
-**Status:** Proposed  
-**Date:** 2026-02-23  
+**Status:** Accepted
+**Date:** 2026-02-23
 **Author:** Doink + Charlie  
 **Relates to:** Issues #37, #39, #40, #41, #42
 

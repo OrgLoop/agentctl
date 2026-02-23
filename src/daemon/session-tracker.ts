@@ -1,4 +1,8 @@
-import type { AgentAdapter, AgentSession } from "../core/types.js";
+import type {
+  AgentAdapter,
+  AgentSession,
+  DiscoveredSession,
+} from "../core/types.js";
 import type { SessionRecord, StateManager } from "./state.js";
 
 export interface SessionTrackerOpts {
@@ -56,28 +60,29 @@ export class SessionTracker {
   }
 
   private async poll(): Promise<void> {
-    // Collect PIDs from all adapter-returned sessions (the source of truth)
+    // Collect PIDs from all adapter-discovered sessions (the source of truth)
     const adapterPidToId = new Map<number, string>();
 
     for (const [adapterName, adapter] of Object.entries(this.adapters)) {
       try {
-        const sessions = await adapter.list({ all: true });
-        for (const session of sessions) {
-          if (session.pid) {
-            adapterPidToId.set(session.pid, session.id);
+        // Discover-first: adapter.discover() is the ground truth
+        const discovered = await adapter.discover();
+        for (const disc of discovered) {
+          if (disc.pid) {
+            adapterPidToId.set(disc.pid, disc.id);
           }
 
-          const existing = this.state.getSession(session.id);
-          const record = sessionToRecord(session, adapterName);
+          const existing = this.state.getSession(disc.id);
+          const record = discoveredToRecord(disc, adapterName);
 
           if (!existing) {
-            this.state.setSession(session.id, record);
+            this.state.setSession(disc.id, record);
           } else if (
             existing.status !== record.status ||
             (!existing.model && record.model)
           ) {
-            // Status changed or model resolved — update
-            this.state.setSession(session.id, {
+            // Status changed or model resolved — update, preserving metadata
+            this.state.setSession(disc.id, {
               ...existing,
               status: record.status,
               stoppedAt: record.stoppedAt,
@@ -85,6 +90,7 @@ export class SessionTracker {
               tokens: record.tokens,
               cost: record.cost,
               prompt: record.prompt || existing.prompt,
+              pid: record.pid,
             });
           }
         }
@@ -400,5 +406,26 @@ function sessionToRecord(
     pid: session.pid,
     group: session.group,
     meta: session.meta,
+  };
+}
+
+/** Convert a DiscoveredSession (adapter ground truth) to a SessionRecord for state */
+function discoveredToRecord(
+  disc: DiscoveredSession,
+  adapterName: string,
+): SessionRecord {
+  return {
+    id: disc.id,
+    adapter: adapterName,
+    status: disc.status,
+    startedAt: disc.startedAt?.toISOString() ?? new Date().toISOString(),
+    stoppedAt: disc.stoppedAt?.toISOString(),
+    cwd: disc.cwd,
+    model: disc.model,
+    prompt: disc.prompt,
+    tokens: disc.tokens,
+    cost: disc.cost,
+    pid: disc.pid,
+    meta: disc.nativeMetadata ?? {},
   };
 }

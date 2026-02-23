@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LaunchOpts,
   LifecycleEvent,
   ListOpts,
@@ -124,6 +125,45 @@ export class CodexAdapter implements AgentAdapter {
       opts?.sessionsMetaDir || path.join(this.codexDir, "agentctl", "sessions");
     this.getPids = opts?.getPids || getCodexPids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
+  }
+
+  async discover(): Promise<DiscoveredSession[]> {
+    const runningPids = await this.getPids();
+    const sessionInfos = await this.discoverSessions();
+    const results: DiscoveredSession[] = [];
+
+    for (const info of sessionInfos) {
+      const isRunning = this.isSessionRunning(info, runningPids);
+      const pid = isRunning
+        ? this.findMatchingPid(info, runningPids)
+        : undefined;
+
+      results.push({
+        id: info.id,
+        status: isRunning ? "running" : "stopped",
+        adapter: this.id,
+        cwd: info.cwd,
+        model: info.model,
+        startedAt: info.created,
+        stoppedAt: isRunning ? undefined : info.modified,
+        pid,
+        prompt: info.firstPrompt,
+        tokens: info.tokens,
+        nativeMetadata: {
+          cliVersion: info.cliVersion,
+          lastMessage: info.lastMessage,
+        },
+      });
+    }
+
+    return results;
+  }
+
+  async isAlive(sessionId: string): Promise<boolean> {
+    const runningPids = await this.getPids();
+    const info = await this.findSession(sessionId);
+    if (!info) return false;
+    return this.isSessionRunning(info, runningPids);
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {

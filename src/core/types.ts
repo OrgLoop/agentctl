@@ -1,9 +1,35 @@
 // agentctl core types — Universal Agent Supervision Interface
 
+/**
+ * Session discovered by an adapter's runtime — the ground truth for "what exists."
+ * This is the source of truth for session lifecycle in the discover-first model.
+ */
+export interface DiscoveredSession {
+  id: string;
+  status: "running" | "stopped";
+  adapter: string;
+  cwd?: string;
+  model?: string;
+  startedAt?: Date;
+  stoppedAt?: Date;
+  pid?: number;
+  prompt?: string;
+  tokens?: { in: number; out: number };
+  cost?: number;
+  /** Adapter-native fields — whatever the runtime provides */
+  nativeMetadata?: Record<string, unknown>;
+}
+
 export interface AgentAdapter {
   id: string; // "claude-code", "openclaw", etc.
 
-  // Discovery
+  // Discover-first: ground truth from adapter runtime
+  /** Find all sessions currently managed by this adapter's runtime. */
+  discover(): Promise<DiscoveredSession[]>;
+  /** Check if a specific session is still alive. */
+  isAlive(sessionId: string): Promise<boolean>;
+
+  // Legacy discovery (delegates to discover() with filtering)
   list(opts?: ListOpts): Promise<AgentSession[]>;
 
   // Read

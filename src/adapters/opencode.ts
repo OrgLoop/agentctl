@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LaunchOpts,
   LifecycleEvent,
   ListOpts,
@@ -141,6 +142,71 @@ export class OpenCodeAdapter implements AgentAdapter {
       path.join(os.homedir(), ".agentctl", "opencode-sessions");
     this.getPids = opts?.getPids || getOpenCodePids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
+  }
+
+  async discover(): Promise<DiscoveredSession[]> {
+    const runningPids = await this.getPids();
+    const results: DiscoveredSession[] = [];
+
+    let projectDirs: string[];
+    try {
+      projectDirs = await fs.readdir(this.sessionDir);
+    } catch {
+      return [];
+    }
+
+    for (const projHash of projectDirs) {
+      const projPath = path.join(this.sessionDir, projHash);
+      const stat = await fs.stat(projPath).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+
+      const sessionFiles = await this.getSessionFilesForProject(projPath);
+
+      for (const sessionData of sessionFiles) {
+        const isRunning = await this.isSessionRunning(sessionData, runningPids);
+        const { model, tokens, cost } = await this.aggregateMessageStats(
+          sessionData.id,
+        );
+
+        const createdAt = sessionData.time?.created
+          ? new Date(sessionData.time.created)
+          : new Date();
+        const updatedAt = sessionData.time?.updated
+          ? new Date(sessionData.time.updated)
+          : undefined;
+
+        results.push({
+          id: sessionData.id,
+          status: isRunning ? "running" : "stopped",
+          adapter: this.id,
+          cwd: sessionData.directory,
+          model,
+          startedAt: createdAt,
+          stoppedAt: isRunning ? undefined : updatedAt,
+          pid: isRunning
+            ? await this.findMatchingPid(sessionData, runningPids)
+            : undefined,
+          prompt: sessionData.title?.slice(0, 200),
+          tokens,
+          cost,
+          nativeMetadata: {
+            projectID: sessionData.projectID,
+            slug: sessionData.slug,
+            summary: sessionData.summary,
+            version: sessionData.version,
+          },
+        });
+      }
+    }
+
+    return results;
+  }
+
+  async isAlive(sessionId: string): Promise<boolean> {
+    const runningPids = await this.getPids();
+    const resolved = await this.resolveSessionId(sessionId);
+    if (!resolved) return false;
+    return this.isSessionRunning(resolved, runningPids);
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {
