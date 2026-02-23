@@ -527,6 +527,7 @@ program
       const daemonRunning = await ensureDaemon();
 
       try {
+        let groupId = "";
         const result = await orchestrateLaunch({
           slots,
           prompt: opts.prompt,
@@ -542,12 +543,15 @@ program
                   id: slotResult.sessionId,
                   adapter: slotResult.slot.adapter,
                   cwd: slotResult.cwd,
-                  group: result.groupId,
+                  group: groupId,
                 })
                 .catch(() => {
                   // Best effort — session will be picked up by poll
                 });
             }
+          },
+          onGroupCreated: (id) => {
+            groupId = id;
           },
         });
 

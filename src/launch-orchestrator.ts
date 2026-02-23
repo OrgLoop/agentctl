@@ -37,6 +37,8 @@ export interface OrchestrateOpts {
   adapters: Record<string, AgentAdapter>;
   /** Optional: callback when daemon is available for lock/track */
   onSessionLaunched?: (result: SlotLaunchResult) => void;
+  /** Optional: callback when group ID is generated (before launches) */
+  onGroupCreated?: (groupId: string) => void;
 }
 
 // --- Group ID generation ---
@@ -135,6 +137,7 @@ export async function orchestrateLaunch(
 ): Promise<OrchestratedLaunchResult> {
   const { slots, prompt, spec, cwd, hooks, adapters } = opts;
   const groupId = generateGroupId();
+  opts.onGroupCreated?.(groupId);
   const repo = path.resolve(cwd);
 
   // Phase 1: Create all worktrees (sequential to avoid git lock contention)
