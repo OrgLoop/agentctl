@@ -30,6 +30,11 @@ npm run lint:fix   # biome check --write
 - `src/adapters/opencode.ts` — OpenCode adapter (reads ~/.local/share/opencode/storage/, cross-refs PIDs)
 - `src/adapters/pi.ts` — Pi coding agent adapter (reads ~/.pi/, cross-refs PIDs)
 - `src/adapters/pi-rust.ts` — Pi Rust adapter (reads ~/.pi/agent/sessions/, cross-refs PIDs)
+- `src/launch-orchestrator.ts` — Parallel multi-adapter launch orchestration (group IDs, worktree creation, parallel dispatch)
+- `src/matrix-parser.ts` — YAML matrix file parser + cross-product expansion for sweep launches
+- `src/worktree.ts` — Git worktree create/list/clean utilities
+- `src/hooks.ts` — Lifecycle hook runner (env vars: SESSION_ID, CWD, ADAPTER, BRANCH, EXIT_CODE, GROUP, MODEL)
+- `src/merge.ts` — Git commit/push/PR for sessions
 - `src/cli.ts` — CLI entry point (commander)
 - `src/daemon/server.ts` — Daemon: Unix socket server + HTTP metrics
 - `src/daemon/session-tracker.ts` — Session lifecycle tracking

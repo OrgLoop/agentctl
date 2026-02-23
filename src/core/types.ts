@@ -32,6 +32,7 @@ export interface AgentSession {
   tokens?: { in: number; out: number };
   cost?: number;
   pid?: number;
+  group?: string; // launch group tag, e.g. "g-a1b2c3"
   meta: Record<string, unknown>;
 }
 
