@@ -8,11 +8,15 @@ export interface SessionTrackerOpts {
   isProcessAlive?: (pid: number) => boolean;
 }
 
+/** Max age for stopped sessions in state before pruning (7 days) */
+const STOPPED_SESSION_PRUNE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class SessionTracker {
   private state: StateManager;
   private adapters: Record<string, AgentAdapter>;
   private pollIntervalMs: number;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
+  private polling = false;
   private readonly isProcessAlive: (pid: number) => boolean;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
@@ -24,11 +28,24 @@ export class SessionTracker {
 
   startPolling(): void {
     if (this.pollHandle) return;
+    // Prune old stopped sessions on startup
+    this.pruneOldSessions();
     // Initial poll
-    this.poll().catch((err) => console.error("Poll error:", err));
+    this.guardedPoll();
     this.pollHandle = setInterval(() => {
-      this.poll().catch((err) => console.error("Poll error:", err));
+      this.guardedPoll();
     }, this.pollIntervalMs);
+  }
+
+  /** Run poll() with a guard to skip if the previous cycle is still running */
+  private guardedPoll(): void {
+    if (this.polling) return;
+    this.polling = true;
+    this.poll()
+      .catch((err) => console.error("Poll error:", err))
+      .finally(() => {
+        this.polling = false;
+      });
   }
 
   stopPolling(): void {
@@ -117,6 +134,37 @@ export class SessionTracker {
           });
         }
       }
+    }
+  }
+
+  /**
+   * Remove stopped sessions from state that have been stopped for more than 7 days.
+   * This reduces overhead from accumulating hundreds of historical sessions.
+   */
+  private pruneOldSessions(): void {
+    const sessions = this.state.getSessions();
+    const now = Date.now();
+    let pruned = 0;
+
+    for (const [id, record] of Object.entries(sessions)) {
+      if (
+        record.status !== "stopped" &&
+        record.status !== "completed" &&
+        record.status !== "failed"
+      ) {
+        continue;
+      }
+      const stoppedAt = record.stoppedAt
+        ? new Date(record.stoppedAt).getTime()
+        : new Date(record.startedAt).getTime();
+      if (now - stoppedAt > STOPPED_SESSION_PRUNE_AGE_MS) {
+        this.state.removeSession(id);
+        pruned++;
+      }
+    }
+
+    if (pruned > 0) {
+      console.error(`Pruned ${pruned} sessions stopped >7 days ago from state`);
     }
   }
 
