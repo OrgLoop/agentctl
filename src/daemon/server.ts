@@ -1,9 +1,11 @@
+import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { ClaudeCodeAdapter } from "../adapters/claude-code.js";
 import { CodexAdapter } from "../adapters/codex.js";
 import { OpenClawAdapter } from "../adapters/openclaw.js";
@@ -12,11 +14,15 @@ import { PiAdapter } from "../adapters/pi.js";
 import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
 import { migrateLocks } from "../migration/migrate-locks.js";
+import { saveEnvironment } from "../utils/daemon-env.js";
+import { clearBinaryCache } from "../utils/resolve-binary.js";
 import { FuseEngine } from "./fuse-engine.js";
 import { LockManager } from "./lock-manager.js";
 import { MetricsRegistry } from "./metrics.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
+
+const execFileAsync = promisify(execFile);
 
 // --- Protocol types ---
 
@@ -56,26 +62,36 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   const configDir = opts.configDir || path.join(os.homedir(), ".agentctl");
   await fs.mkdir(configDir, { recursive: true });
 
-  // 1. Check for existing daemon
   const pidFilePath = path.join(configDir, "agentctl.pid");
-  const existingPid = await readPidFile(pidFilePath);
-  if (existingPid && isProcessAlive(existingPid)) {
-    throw new Error(`Daemon already running (PID ${existingPid})`);
+  const sockPath = path.join(configDir, "agentctl.sock");
+
+  // 1. Kill stale daemon/supervisor processes before anything else (#39)
+  await killStaleDaemons(configDir);
+
+  // 2. Verify no daemon is actually running by trying to connect to socket
+  const socketAlive = await isSocketAlive(sockPath);
+  if (socketAlive) {
+    throw new Error("Daemon already running (socket responsive)");
   }
 
-  // 2. Clean stale socket
-  const sockPath = path.join(configDir, "agentctl.sock");
+  // 3. Clean stale socket file
   await fs.rm(sockPath, { force: true });
 
-  // 3. Run migration (idempotent)
+  // 4. Save shell environment for subprocess spawning (#42)
+  await saveEnvironment(configDir);
+
+  // 5. Clear binary cache on restart (#41 — pick up moved/updated binaries)
+  clearBinaryCache();
+
+  // 6. Run migration (idempotent)
   await migrateLocks(configDir).catch((err) =>
     console.error("Migration warning:", err.message),
   );
 
-  // 4. Load persisted state
+  // 7. Load persisted state
   const state = await StateManager.load(configDir);
 
-  // 5. Initialize subsystems
+  // 8. Initialize subsystems
   const adapters: Record<string, AgentAdapter> = opts.adapters || {
     "claude-code": new ClaudeCodeAdapter(),
     codex: new CodexAdapter(),
@@ -99,13 +115,16 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     metrics.recordFuseFired();
   });
 
-  // 6. Resume fuse timers
+  // 9. Validate all sessions on startup — mark dead ones as stopped (#40)
+  sessionTracker.validateAllSessions();
+
+  // 10. Resume fuse timers
   fuseEngine.resumeTimers();
 
-  // 7. Start session polling
+  // 11. Start session polling
   sessionTracker.startPolling();
 
-  // 8. Create request handler
+  // 12. Create request handler
   const handleRequest = createRequestHandler({
     sessionTracker,
     lockManager,
@@ -117,7 +136,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     sockPath,
   });
 
-  // 9. Start Unix socket server
+  // 13. Start Unix socket server
   const socketServer = net.createServer((conn) => {
     let buffer = "";
     conn.on("data", (chunk) => {
@@ -156,7 +175,10 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     socketServer.on("error", reject);
   });
 
-  // 10. Start HTTP metrics server
+  // 14. Write PID file (after socket is listening — acts as "lock acquired")
+  await fs.writeFile(pidFilePath, String(process.pid));
+
+  // 15. Start HTTP metrics server
   const metricsPort = opts.metricsPort ?? 9200;
   const httpServer = http.createServer((req, res) => {
     if (req.url === "/metrics" && req.method === "GET") {
@@ -175,9 +197,6 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     httpServer.on("error", reject);
   });
 
-  // 11. Write PID file
-  await fs.writeFile(pidFilePath, String(process.pid));
-
   // Shutdown function
   const shutdown = async () => {
     sessionTracker.stopPolling();
@@ -190,7 +209,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     await fs.rm(pidFilePath, { force: true });
   };
 
-  // 12. Signal handlers
+  // 16. Signal handlers
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, async () => {
       console.log(`Received ${sig}, shutting down...`);
@@ -204,6 +223,86 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   console.log(`  Metrics: http://localhost:${metricsPort}/metrics`);
 
   return { socketServer, httpServer, shutdown };
+}
+
+// --- Stale daemon cleanup (#39) ---
+
+/**
+ * Find and kill ALL stale agentctl daemon/supervisor processes.
+ * This ensures singleton enforcement even after unclean shutdowns.
+ */
+async function killStaleDaemons(configDir: string): Promise<void> {
+  // 1. Kill processes recorded in PID files
+  for (const pidFile of ["agentctl.pid", "supervisor.pid"]) {
+    const p = path.join(configDir, pidFile);
+    const pid = await readPidFile(p);
+    if (pid && pid !== process.pid && isProcessAlive(pid)) {
+      try {
+        process.kill(pid, "SIGTERM");
+        // Wait briefly for clean shutdown
+        await sleep(500);
+        if (isProcessAlive(pid)) {
+          process.kill(pid, "SIGKILL");
+        }
+      } catch {
+        // Already gone
+      }
+    }
+    // Clean up stale PID file
+    await fs.rm(p, { force: true }).catch(() => {});
+  }
+
+  // 2. Scan ps for any remaining agentctl daemon processes
+  try {
+    const { stdout } = await execFileAsync("ps", ["aux"]);
+    for (const line of stdout.split("\n")) {
+      if (!line.includes("agentctl") || !line.includes("daemon")) continue;
+      if (line.includes("grep")) continue;
+
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 2) continue;
+      const pid = Number.parseInt(fields[1], 10);
+      if (Number.isNaN(pid) || pid === process.pid) continue;
+      // Also skip our parent process (supervisor)
+      if (pid === process.ppid) continue;
+
+      try {
+        process.kill(pid, "SIGTERM");
+        await sleep(200);
+        if (isProcessAlive(pid)) {
+          process.kill(pid, "SIGKILL");
+        }
+      } catch {
+        // Already gone
+      }
+    }
+  } catch {
+    // ps failed — best effort
+  }
+}
+
+/**
+ * Check if a Unix socket is actually responsive (not just a stale file).
+ */
+async function isSocketAlive(sockPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(sockPath);
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, 1000);
+
+    socket.on("connect", () => {
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(true);
+    });
+
+    socket.on("error", () => {
+      clearTimeout(timeout);
+      resolve(false);
+    });
+  });
 }
 
 // --- Request handler ---
@@ -352,6 +451,12 @@ function createRequestHandler(ctx: HandlerContext) {
         return null;
       }
 
+      // --- Prune command (#40) ---
+      case "session.prune": {
+        const pruned = ctx.sessionTracker.pruneDeadSessions();
+        return { pruned };
+      }
+
       case "lock.list":
         return ctx.lockManager.listAll();
 
@@ -414,4 +519,8 @@ function isProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -14,53 +14,13 @@ import type {
   PeekOpts,
   StopOpts,
 } from "../core/types.js";
+import { buildSpawnEnv } from "../utils/daemon-env.js";
 import { readHead, readTail } from "../utils/partial-read.js";
+import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_CLAUDE_DIR = path.join(os.homedir(), ".claude");
-
-/** Resolve the absolute path to the `claude` binary, checking common locations */
-let _resolvedClaudePath: string | undefined;
-async function resolveClaudePath(): Promise<string> {
-  if (_resolvedClaudePath) return _resolvedClaudePath;
-
-  // Check common install locations first (most reliable — doesn't depend on PATH)
-  const candidates = [
-    path.join(os.homedir(), ".local", "bin", "claude"),
-    "/usr/local/bin/claude",
-    path.join(os.homedir(), ".npm-global", "bin", "claude"),
-    // npm global installs
-    path.join(os.homedir(), ".local", "share", "mise", "shims", "claude"),
-  ];
-  for (const c of candidates) {
-    try {
-      await fs.access(c, fs.constants.X_OK);
-      // Resolve symlinks to get the actual binary path
-      const resolved = await fs.realpath(c);
-      await fs.access(resolved, fs.constants.X_OK);
-      _resolvedClaudePath = resolved;
-      return resolved;
-    } catch {
-      // Try next
-    }
-  }
-
-  // Try `which claude` as fallback
-  try {
-    const { stdout } = await execFileAsync("which", ["claude"]);
-    const p = stdout.trim();
-    if (p) {
-      _resolvedClaudePath = p;
-      return p;
-    }
-  } catch {
-    // Fall through
-  }
-
-  // Last resort: bare name (let PATH resolve it)
-  return "claude";
-}
 
 // Default: only show stopped sessions from the last 7 days
 const STOPPED_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -269,7 +229,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
     args.push("-p", opts.prompt);
 
-    const env = { ...process.env, ...opts.env };
+    const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID
@@ -279,7 +239,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const logFd = await fs.open(logPath, "w");
 
     // Capture stderr to the same log file for debugging launch failures
-    const claudePath = await resolveClaudePath();
+    const claudePath = await resolveBinaryPath("claude");
     const child = spawn(claudePath, args, {
       cwd,
       env,
@@ -416,7 +376,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const session = await this.status(sessionId).catch(() => null);
     const cwd = session?.cwd || process.cwd();
 
-    const claudePath = await resolveClaudePath();
+    const claudePath = await resolveBinaryPath("claude");
     const child = spawn(claudePath, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],

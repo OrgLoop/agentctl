@@ -14,6 +14,8 @@ import type {
   PeekOpts,
   StopOpts,
 } from "../core/types.js";
+import { buildSpawnEnv } from "../utils/daemon-env.js";
+import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -212,17 +214,22 @@ export class CodexAdapter implements AgentAdapter {
     args.push("--cd", cwd);
     args.push(opts.prompt);
 
-    const env = { ...process.env, ...opts.env };
+    const env = buildSpawnEnv(undefined, opts.env);
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const child = spawn("codex", args, {
+    const codexPath = await resolveBinaryPath("codex");
+    const child = spawn(codexPath, args, {
       cwd,
       env,
       stdio: ["ignore", logFd.fd, "ignore"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[codex] spawn error: ${err.message}`);
     });
 
     child.unref();
@@ -342,10 +349,15 @@ export class CodexAdapter implements AgentAdapter {
       message,
     ];
 
-    const child = spawn("codex", args, {
+    const codexPath = await resolveBinaryPath("codex");
+    const child = spawn(codexPath, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[codex] resume spawn error: ${err.message}`);
     });
 
     child.unref();

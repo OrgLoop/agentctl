@@ -138,6 +138,88 @@ export class SessionTracker {
   }
 
   /**
+   * Validate all sessions on daemon startup (#40).
+   * Any session marked as "running" or "idle" whose PID is dead gets
+   * immediately marked as "stopped". This prevents unbounded growth of
+   * ghost sessions across daemon restarts.
+   */
+  validateAllSessions(): void {
+    const sessions = this.state.getSessions();
+    let cleaned = 0;
+
+    for (const [id, record] of Object.entries(sessions)) {
+      if (record.status !== "running" && record.status !== "idle") continue;
+
+      if (record.pid) {
+        if (!this.isProcessAlive(record.pid)) {
+          this.state.setSession(id, {
+            ...record,
+            status: "stopped",
+            stoppedAt: new Date().toISOString(),
+          });
+          cleaned++;
+        }
+      } else {
+        // No PID recorded — can't verify, mark as stopped
+        this.state.setSession(id, {
+          ...record,
+          status: "stopped",
+          stoppedAt: new Date().toISOString(),
+        });
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      console.error(
+        `Validated sessions on startup: marked ${cleaned} dead sessions as stopped`,
+      );
+    }
+  }
+
+  /**
+   * Aggressively prune all clearly-dead sessions (#40).
+   * Returns the number of sessions pruned.
+   * Called via `agentctl prune` command.
+   */
+  pruneDeadSessions(): number {
+    const sessions = this.state.getSessions();
+    let pruned = 0;
+
+    for (const [id, record] of Object.entries(sessions)) {
+      // Remove stopped/completed/failed sessions older than 24h
+      if (
+        record.status === "stopped" ||
+        record.status === "completed" ||
+        record.status === "failed"
+      ) {
+        const stoppedAt = record.stoppedAt
+          ? new Date(record.stoppedAt).getTime()
+          : new Date(record.startedAt).getTime();
+        const age = Date.now() - stoppedAt;
+        if (age > 24 * 60 * 60 * 1000) {
+          this.state.removeSession(id);
+          pruned++;
+        }
+        continue;
+      }
+
+      // Remove running/idle sessions whose PID is dead
+      if (record.status === "running" || record.status === "idle") {
+        if (record.pid && !this.isProcessAlive(record.pid)) {
+          this.state.removeSession(id);
+          pruned++;
+        } else if (!record.pid) {
+          this.state.removeSession(id);
+          pruned++;
+        }
+      }
+    }
+
+    return pruned;
+  }
+
+  /**
    * Remove stopped sessions from state that have been stopped for more than 7 days.
    * This reduces overhead from accumulating hundreds of historical sessions.
    */

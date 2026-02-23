@@ -14,6 +14,8 @@ import type {
   PeekOpts,
   StopOpts,
 } from "../core/types.js";
+import { buildSpawnEnv } from "../utils/daemon-env.js";
+import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -281,7 +283,7 @@ export class PiAdapter implements AgentAdapter {
       args.unshift("--model", opts.model);
     }
 
-    const env = { ...process.env, ...opts.env };
+    const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID
@@ -289,11 +291,16 @@ export class PiAdapter implements AgentAdapter {
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const child = spawn("pi", args, {
+    const piPath = await resolveBinaryPath("pi");
+    const child = spawn(piPath, args, {
       cwd,
       env,
       stdio: ["ignore", logFd.fd, logFd.fd],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[pi] spawn error: ${err.message}`);
     });
 
     // Fully detach: child runs in its own process group.
@@ -466,10 +473,15 @@ export class PiAdapter implements AgentAdapter {
     const disc = await this.findSession(sessionId);
     const cwd = disc?.header.cwd || process.cwd();
 
-    const child = spawn("pi", ["-p", message], {
+    const piPath = await resolveBinaryPath("pi");
+    const child = spawn(piPath, ["-p", message], {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
+    });
+
+    child.on("error", (err) => {
+      console.error(`[pi] resume spawn error: ${err.message}`);
     });
 
     child.unref();
