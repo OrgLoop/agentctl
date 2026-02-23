@@ -63,9 +63,8 @@ describe("StateManager", () => {
         path.join(tmpDir, "fuses.json"),
         JSON.stringify([
           {
-            directory: "/tmp/mono-test",
-            clusterName: "kindo-charlie-test",
-            branch: "test",
+            directory: "/tmp/project-test",
+            ttlMs: 600000,
             expiresAt: "2025-01-01T01:00:00Z",
             sessionId: "test-1",
           },
@@ -194,16 +193,15 @@ describe("StateManager", () => {
       const state = await StateManager.load(tmpDir);
 
       const fuse: FuseTimer = {
-        directory: "/tmp/mono-test",
-        clusterName: "kindo-charlie-test",
-        branch: "test",
+        directory: "/tmp/project-test",
+        ttlMs: 600000,
         expiresAt: new Date(Date.now() + 600000).toISOString(),
         sessionId: "s1",
       };
       state.addFuse(fuse);
       expect(state.getFuses()).toHaveLength(1);
 
-      state.removeFuse("/tmp/mono-test");
+      state.removeFuse("/tmp/project-test");
       expect(state.getFuses()).toHaveLength(0);
     });
 
@@ -211,23 +209,23 @@ describe("StateManager", () => {
       const state = await StateManager.load(tmpDir);
 
       state.addFuse({
-        directory: "/tmp/mono-test",
-        clusterName: "cluster-1",
-        branch: "test",
+        directory: "/tmp/project-test",
+        ttlMs: 600000,
         expiresAt: new Date().toISOString(),
         sessionId: "s1",
+        label: "fuse-1",
       });
       state.addFuse({
-        directory: "/tmp/mono-test",
-        clusterName: "cluster-2",
-        branch: "test",
+        directory: "/tmp/project-test",
+        ttlMs: 600000,
         expiresAt: new Date().toISOString(),
         sessionId: "s2",
+        label: "fuse-2",
       });
 
       const fuses = state.getFuses();
       expect(fuses).toHaveLength(1);
-      expect(fuses[0].clusterName).toBe("cluster-2");
+      expect(fuses[0].sessionId).toBe("s2");
     });
   });
 });

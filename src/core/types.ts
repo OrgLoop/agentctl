@@ -105,6 +105,4 @@ export interface LaunchOpts {
 export interface LifecycleHooks {
   onCreate?: string;
   onComplete?: string;
-  preMerge?: string;
-  postMerge?: string;
 }

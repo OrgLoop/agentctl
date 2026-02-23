@@ -69,15 +69,14 @@ describe("MetricsRegistry", () => {
       metrics.recordSessionCompleted(300);
       metrics.recordSessionFailed(60);
       metrics.recordSessionStopped(45);
-      metrics.recordFuseFired();
+      metrics.recordFuseExpired();
 
       const output = metrics.generateMetrics();
 
       expect(output).toContain('agentctl_sessions_total{status="completed"} 2');
       expect(output).toContain('agentctl_sessions_total{status="failed"} 1');
       expect(output).toContain('agentctl_sessions_total{status="stopped"} 1');
-      expect(output).toContain("agentctl_fuses_fired_total 1");
-      expect(output).toContain("agentctl_kind_clusters_deleted_total 1");
+      expect(output).toContain("agentctl_fuses_expired_total 1");
     });
 
     it("computes histogram buckets correctly", () => {

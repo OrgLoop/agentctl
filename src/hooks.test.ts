@@ -113,19 +113,4 @@ describe("runHook", () => {
     const content = await fs.readFile(outFile, "utf-8");
     expect(content.trim()).toBe("completed");
   });
-
-  it("runs preMerge and postMerge hooks", async () => {
-    const preFile = path.join(tmpDir, "pre.txt");
-    const postFile = path.join(tmpDir, "post.txt");
-    const hooks: LifecycleHooks = {
-      preMerge: `echo pre > ${preFile}`,
-      postMerge: `echo post > ${postFile}`,
-    };
-
-    await runHook(hooks, "preMerge", { ...defaultCtx, cwd: tmpDir });
-    await runHook(hooks, "postMerge", { ...defaultCtx, cwd: tmpDir });
-
-    expect((await fs.readFile(preFile, "utf-8")).trim()).toBe("pre");
-    expect((await fs.readFile(postFile, "utf-8")).trim()).toBe("post");
-  });
 });

@@ -6,8 +6,7 @@ export class MetricsRegistry {
   sessionsTotalCompleted = 0;
   sessionsTotalFailed = 0;
   sessionsTotalStopped = 0;
-  fusesFiredTotal = 0;
-  clustersDeletedTotal = 0;
+  fusesExpiredTotal = 0;
   sessionDurations: number[] = []; // seconds
 
   constructor(
@@ -31,9 +30,8 @@ export class MetricsRegistry {
     if (durationSeconds != null) this.sessionDurations.push(durationSeconds);
   }
 
-  recordFuseFired(): void {
-    this.fusesFiredTotal++;
-    this.clustersDeletedTotal++;
+  recordFuseExpired(): void {
+    this.fusesExpiredTotal++;
   }
 
   generateMetrics(): string {
@@ -98,11 +96,10 @@ export class MetricsRegistry {
       'status="stopped"',
     );
 
-    c("agentctl_fuses_fired_total", "Total fuses fired", this.fusesFiredTotal);
     c(
-      "agentctl_kind_clusters_deleted_total",
-      "Total Kind clusters deleted",
-      this.clustersDeletedTotal,
+      "agentctl_fuses_expired_total",
+      "Total fuses expired",
+      this.fusesExpiredTotal,
     );
 
     // Histogram (session duration)
