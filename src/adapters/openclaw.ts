@@ -6,6 +6,7 @@ import path from "node:path";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LaunchOpts,
   LifecycleEvent,
   ListOpts,
@@ -314,6 +315,75 @@ export class OpenClawAdapter implements AgentAdapter {
     } catch {
       // Don't break adapter construction if identity can't be created
       return null;
+    }
+  }
+
+  async discover(): Promise<DiscoveredSession[]> {
+    if (!this.authToken) return [];
+
+    let result: SessionsListResult;
+    try {
+      result = (await this.rpcCall("sessions.list", {
+        includeDerivedTitles: true,
+        includeLastMessage: true,
+      })) as SessionsListResult;
+    } catch {
+      return [];
+    }
+
+    return result.sessions.map((row) => {
+      const now = Date.now();
+      const updatedAt = row.updatedAt ?? 0;
+      const ageMs = now - updatedAt;
+      const isActive = updatedAt > 0 && ageMs < 5 * 60 * 1000;
+
+      const model = row.model || result.defaults.model || undefined;
+      const input = row.inputTokens ?? 0;
+      const output = row.outputTokens ?? 0;
+
+      return {
+        id: row.sessionId || row.key,
+        status: isActive ? "running" : ("stopped" as const),
+        adapter: this.id,
+        model,
+        startedAt: updatedAt > 0 ? new Date(updatedAt) : new Date(),
+        prompt: row.derivedTitle || row.displayName || row.label,
+        tokens: input || output ? { in: input, out: output } : undefined,
+        nativeMetadata: {
+          key: row.key,
+          kind: row.kind,
+          channel: row.channel,
+          displayName: row.displayName,
+          modelProvider: row.modelProvider || result.defaults.modelProvider,
+          lastMessagePreview: row.lastMessagePreview,
+        },
+      };
+    });
+  }
+
+  async isAlive(sessionId: string): Promise<boolean> {
+    if (!this.authToken) return false;
+
+    try {
+      const result = (await this.rpcCall("sessions.list", {
+        search: sessionId,
+      })) as SessionsListResult;
+
+      const row = result.sessions.find(
+        (s) =>
+          s.sessionId === sessionId ||
+          s.key === sessionId ||
+          s.sessionId?.startsWith(sessionId) ||
+          s.key.startsWith(sessionId),
+      );
+
+      if (!row) return false;
+
+      const updatedAt = row.updatedAt ?? 0;
+      const ageMs = Date.now() - updatedAt;
+      return updatedAt > 0 && ageMs < 5 * 60 * 1000;
+    } catch {
+      return false;
     }
   }
 

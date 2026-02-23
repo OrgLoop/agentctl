@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LaunchOpts,
   LifecycleEvent,
   ListOpts,
@@ -129,6 +130,91 @@ export class PiRustAdapter implements AgentAdapter {
       path.join(os.homedir(), ".pi", "agentctl", "sessions");
     this.getPids = opts?.getPids || getPiRustPids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
+  }
+
+  async discover(): Promise<DiscoveredSession[]> {
+    const runningPids = await this.getPids();
+    const results: DiscoveredSession[] = [];
+
+    let projectDirs: string[];
+    try {
+      const entries = await fs.readdir(this.sessionDir);
+      projectDirs = entries.filter((e) => e.startsWith("--"));
+    } catch {
+      return [];
+    }
+
+    for (const projDir of projectDirs) {
+      const projPath = path.join(this.sessionDir, projDir);
+      const stat = await fs.stat(projPath).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+
+      const projectCwd = decodeProjDir(projDir);
+      const sessionFiles = await this.getSessionFiles(projPath);
+
+      for (const file of sessionFiles) {
+        const filePath = path.join(projPath, file);
+        const header = await this.readSessionHeader(filePath);
+        if (!header) continue;
+
+        const isRunning = await this.isSessionRunning(
+          header,
+          projectCwd,
+          runningPids,
+        );
+        const { model, tokens, cost } = await this.parseSessionTail(filePath);
+        const firstPrompt = await this.readFirstPrompt(filePath);
+
+        let fileStat: Awaited<ReturnType<typeof fs.stat>> | undefined;
+        try {
+          fileStat = await fs.stat(filePath);
+        } catch {
+          // ignore
+        }
+
+        results.push({
+          id: header.id,
+          status: isRunning ? "running" : "stopped",
+          adapter: this.id,
+          cwd: header.cwd || projectCwd,
+          model: model || header.modelId,
+          startedAt: new Date(header.timestamp),
+          stoppedAt: isRunning
+            ? undefined
+            : fileStat
+              ? new Date(Number(fileStat.mtimeMs))
+              : undefined,
+          pid: isRunning
+            ? await this.findMatchingPid(header, projectCwd, runningPids)
+            : undefined,
+          prompt: firstPrompt?.slice(0, 200),
+          tokens,
+          cost: cost ?? undefined,
+          nativeMetadata: {
+            provider: header.provider,
+            thinkingLevel: header.thinkingLevel,
+            projectDir: projectCwd,
+            sessionFile: filePath,
+          },
+        });
+      }
+    }
+
+    return results;
+  }
+
+  async isAlive(sessionId: string): Promise<boolean> {
+    const runningPids = await this.getPids();
+    const filePath = await this.findSessionFile(sessionId);
+    if (!filePath) return false;
+
+    const header = await this.readSessionHeader(filePath);
+    if (!header) return false;
+
+    const projDir = path.basename(path.dirname(filePath));
+    const projectCwd = decodeProjDir(projDir);
+
+    return this.isSessionRunning(header, projectCwd, runningPids);
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {

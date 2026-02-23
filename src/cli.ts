@@ -21,8 +21,8 @@ import { DaemonClient } from "./client/daemon-client.js";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LifecycleHooks,
-  ListOpts,
 } from "./core/types.js";
 import type { DaemonStatus } from "./daemon/server.js";
 import type { FuseTimer, Lock, SessionRecord } from "./daemon/state.js";
@@ -123,6 +123,19 @@ function formatSession(
   return row;
 }
 
+function formatDiscovered(s: DiscoveredSession): Record<string, string> {
+  return {
+    ID: s.id.slice(0, 8),
+    Adapter: s.adapter,
+    Status: s.status,
+    Model: s.model || "-",
+    CWD: s.cwd ? shortenPath(s.cwd) : "-",
+    PID: s.pid?.toString() || "-",
+    Started: s.startedAt ? timeAgo(s.startedAt) : "-",
+    Prompt: (s.prompt || "-").slice(0, 60),
+  };
+}
+
 function formatRecord(
   s: SessionRecord,
   showGroup: boolean,
@@ -213,6 +226,23 @@ function sessionToJson(s: AgentSession): Record<string, unknown> {
   };
 }
 
+function discoveredToJson(s: DiscoveredSession): Record<string, unknown> {
+  return {
+    id: s.id,
+    adapter: s.adapter,
+    status: s.status,
+    startedAt: s.startedAt?.toISOString(),
+    stoppedAt: s.stoppedAt?.toISOString(),
+    cwd: s.cwd,
+    model: s.model,
+    prompt: s.prompt,
+    tokens: s.tokens,
+    cost: s.cost,
+    pid: s.pid,
+    nativeMetadata: s.nativeMetadata,
+  };
+}
+
 // --- CLI ---
 
 const program = new Command();
@@ -253,25 +283,39 @@ program
       return;
     }
 
-    // Direct fallback
-    const listOpts: ListOpts = { status: opts.status, all: opts.all };
-    let sessions: AgentSession[] = [];
+    // Direct fallback — discover-first
+    let discovered: DiscoveredSession[] = [];
 
     if (opts.adapter) {
       const adapter = getAdapter(opts.adapter);
-      sessions = await adapter.list(listOpts);
+      discovered = await adapter.discover();
     } else {
       for (const adapter of getAllAdapters()) {
-        const s = await adapter.list(listOpts);
-        sessions.push(...s);
+        const d = await adapter.discover().catch(() => []);
+        discovered.push(...d);
       }
     }
 
+    // Apply status/all filters
+    if (opts.status) {
+      discovered = discovered.filter((s) => s.status === opts.status);
+    } else if (!opts.all) {
+      discovered = discovered.filter((s) => s.status === "running");
+    }
+
+    // Sort: running first, then by most recent
+    discovered.sort((a, b) => {
+      if (a.status === "running" && b.status !== "running") return -1;
+      if (b.status === "running" && a.status !== "running") return 1;
+      const aTime = a.startedAt?.getTime() ?? 0;
+      const bTime = b.startedAt?.getTime() ?? 0;
+      return bTime - aTime;
+    });
+
     if (opts.json) {
-      printJson(sessions.map(sessionToJson));
+      printJson(discovered.map(discoveredToJson));
     } else {
-      const hasGroups = sessions.some((s) => s.group);
-      printTable(sessions.map((s) => formatSession(s, hasGroups)));
+      printTable(discovered.map((s) => formatDiscovered(s)));
     }
   });
 

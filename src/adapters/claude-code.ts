@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LaunchOpts,
   LifecycleEvent,
   ListOpts,
@@ -118,6 +119,67 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       path.join(this.claudeDir, "agentctl", "sessions");
     this.getPids = opts?.getPids || getClaudePids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
+  }
+
+  async discover(): Promise<DiscoveredSession[]> {
+    const runningPids = await this.getPids();
+    const results: DiscoveredSession[] = [];
+
+    let projectDirs: string[];
+    try {
+      projectDirs = await fs.readdir(this.projectsDir);
+    } catch {
+      return [];
+    }
+
+    for (const projDir of projectDirs) {
+      const projPath = path.join(this.projectsDir, projDir);
+      const stat = await fs.stat(projPath).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+
+      const entries = await this.getEntriesForProject(projPath, projDir);
+
+      for (const { entry, index } of entries) {
+        if (entry.isSidechain) continue;
+
+        const isRunning = await this.isSessionRunning(
+          entry,
+          index,
+          runningPids,
+        );
+        const { model, tokens } = await this.parseSessionTail(entry.fullPath);
+
+        results.push({
+          id: entry.sessionId,
+          status: isRunning ? "running" : "stopped",
+          adapter: this.id,
+          cwd: index.originalPath || entry.projectPath,
+          model,
+          startedAt: new Date(entry.created),
+          stoppedAt: isRunning ? undefined : new Date(entry.modified),
+          pid: isRunning
+            ? await this.findMatchingPid(entry, index, runningPids)
+            : undefined,
+          prompt: entry.firstPrompt?.slice(0, 200),
+          tokens,
+          nativeMetadata: {
+            projectDir: index.originalPath || entry.projectPath,
+            gitBranch: entry.gitBranch,
+            messageCount: entry.messageCount,
+          },
+        });
+      }
+    }
+
+    return results;
+  }
+
+  async isAlive(sessionId: string): Promise<boolean> {
+    const runningPids = await this.getPids();
+    const entry = await this.findIndexEntry(sessionId);
+    if (!entry) return false;
+
+    return this.isSessionRunning(entry.entry, entry.index, runningPids);
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type {
   AgentAdapter,
   AgentSession,
+  DiscoveredSession,
   LaunchOpts,
   LifecycleEvent,
   ListOpts,
@@ -100,8 +101,8 @@ type PiJSONLEntry =
   | PiModelChange
   | { type: string; [key: string]: unknown };
 
-/** Discovered session from filesystem scan */
-interface DiscoveredSession {
+/** Discovered session from filesystem scan (internal to Pi adapter) */
+interface PiDiscoveredSession {
   sessionId: string;
   filePath: string;
   header: PiSessionHeader;
@@ -132,6 +133,51 @@ export class PiAdapter implements AgentAdapter {
       opts?.sessionsMetaDir || path.join(this.piDir, "agentctl", "sessions");
     this.getPids = opts?.getPids || getPiPids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
+  }
+
+  async discover(): Promise<DiscoveredSession[]> {
+    const runningPids = await this.getPids();
+    const discovered = await this.discoverSessions();
+    const results: DiscoveredSession[] = [];
+
+    for (const disc of discovered) {
+      const isRunning = await this.isSessionRunning(disc, runningPids);
+      const { model, tokens, cost } = await this.parseSessionTail(
+        disc.filePath,
+        disc.header,
+      );
+
+      results.push({
+        id: disc.sessionId,
+        status: isRunning ? "running" : "stopped",
+        adapter: this.id,
+        cwd: disc.header.cwd,
+        model,
+        startedAt: disc.created,
+        stoppedAt: isRunning ? undefined : disc.modified,
+        pid: isRunning
+          ? await this.findMatchingPid(disc, runningPids)
+          : undefined,
+        prompt: await this.getFirstPrompt(disc.filePath),
+        tokens,
+        cost,
+        nativeMetadata: {
+          provider: disc.header.provider,
+          thinkingLevel: disc.header.thinkingLevel,
+          version: disc.header.version,
+          cwdSlug: disc.cwdSlug,
+        },
+      });
+    }
+
+    return results;
+  }
+
+  async isAlive(sessionId: string): Promise<boolean> {
+    const runningPids = await this.getPids();
+    const disc = await this.findSession(sessionId);
+    if (!disc) return false;
+    return this.isSessionRunning(disc, runningPids);
   }
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {
@@ -553,8 +599,8 @@ export class PiAdapter implements AgentAdapter {
    * Scan ~/.pi/agent/sessions/ recursively for .jsonl files and parse headers.
    * Pi stores sessions at <sessionsDir>/<cwd-slug>/<timestamp>_<id>.jsonl
    */
-  private async discoverSessions(): Promise<DiscoveredSession[]> {
-    const results: DiscoveredSession[] = [];
+  private async discoverSessions(): Promise<PiDiscoveredSession[]> {
+    const results: PiDiscoveredSession[] = [];
 
     let cwdSlugs: string[];
     try {
@@ -643,7 +689,7 @@ export class PiAdapter implements AgentAdapter {
   }
 
   private async buildSession(
-    disc: DiscoveredSession,
+    disc: PiDiscoveredSession,
     runningPids: Map<number, PidInfo>,
   ): Promise<AgentSession> {
     const isRunning = await this.isSessionRunning(disc, runningPids);
@@ -676,7 +722,7 @@ export class PiAdapter implements AgentAdapter {
   }
 
   private async isSessionRunning(
-    disc: DiscoveredSession,
+    disc: PiDiscoveredSession,
     runningPids: Map<number, PidInfo>,
   ): Promise<boolean> {
     const sessionCwd = disc.header.cwd;
@@ -777,7 +823,7 @@ export class PiAdapter implements AgentAdapter {
   }
 
   private async findMatchingPid(
-    disc: DiscoveredSession,
+    disc: PiDiscoveredSession,
     runningPids: Map<number, PidInfo>,
   ): Promise<number | undefined> {
     const sessionCwd = disc.header.cwd;
@@ -884,7 +930,7 @@ export class PiAdapter implements AgentAdapter {
   /** Find a session by exact or prefix ID match */
   private async findSession(
     sessionId: string,
-  ): Promise<DiscoveredSession | null> {
+  ): Promise<PiDiscoveredSession | null> {
     const all = await this.discoverSessions();
     return (
       all.find(

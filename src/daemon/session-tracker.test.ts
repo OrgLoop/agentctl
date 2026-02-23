@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentAdapter, AgentSession } from "../core/types.js";
+import type {
+  AgentAdapter,
+  AgentSession,
+  DiscoveredSession,
+} from "../core/types.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
@@ -178,10 +182,26 @@ describe("SessionTracker", () => {
   });
 
   describe("ghost session reaping (issue #22)", () => {
-    /** Create a mock adapter that returns the given sessions from list() */
+    /** Create a mock adapter that returns the given sessions from discover() and list() */
     function mockAdapter(sessions: AgentSession[]): AgentAdapter {
+      const discovered: DiscoveredSession[] = sessions.map((s) => ({
+        id: s.id,
+        status: s.status === "running" ? "running" : "stopped",
+        adapter: s.adapter,
+        cwd: s.cwd,
+        model: s.model,
+        startedAt: s.startedAt,
+        stoppedAt: s.stoppedAt,
+        pid: s.pid,
+        prompt: s.prompt,
+        tokens: s.tokens,
+        cost: s.cost,
+      }));
       return {
         id: "mock",
+        discover: async () => discovered,
+        isAlive: async (id) =>
+          discovered.some((d) => d.id === id && d.status === "running"),
         list: async () => sessions,
         peek: async () => "",
         status: async () => sessions[0],
