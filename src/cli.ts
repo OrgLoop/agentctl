@@ -33,7 +33,6 @@ import {
   parseAdapterSlots,
 } from "./launch-orchestrator.js";
 import { expandMatrix, parseMatrixFile } from "./matrix-parser.js";
-import { mergeSession } from "./merge.js";
 import { createWorktree, type WorktreeInfo } from "./worktree.js";
 
 const adapters: Record<string, AgentAdapter> = {
@@ -519,20 +518,16 @@ program
   .option("--matrix <file>", "YAML matrix file for advanced sweep launch")
   .option("--on-create <script>", "Hook: run after session is created")
   .option("--on-complete <script>", "Hook: run after session completes")
-  .option("--pre-merge <script>", "Hook: run before merge")
-  .option("--post-merge <script>", "Hook: run after merge")
   .allowUnknownOption() // Allow interleaved --adapter/--model for parseAdapterSlots
   .action(async (adapterName: string | undefined, opts) => {
     let cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
 
     // Collect hooks
     const hooks: LifecycleHooks | undefined =
-      opts.onCreate || opts.onComplete || opts.preMerge || opts.postMerge
+      opts.onCreate || opts.onComplete
         ? {
             onCreate: opts.onCreate,
             onComplete: opts.onComplete,
-            preMerge: opts.preMerge,
-            postMerge: opts.postMerge,
           }
         : undefined;
 
@@ -746,91 +741,6 @@ program
     }
   });
 
-// --- Merge command (FEAT-4) ---
-
-program
-  .command("merge <id>")
-  .description("Commit, push, and open PR for a session's work")
-  .option("-m, --message <text>", "Commit message")
-  .option("--remove-worktree", "Remove worktree after merge")
-  .option("--repo <path>", "Main repo path (for worktree removal)")
-  .option("--pre-merge <script>", "Hook: run before merge")
-  .option("--post-merge <script>", "Hook: run after merge")
-  .action(async (id: string, opts) => {
-    // Find session
-    const daemonRunning = await ensureDaemon();
-    let sessionCwd: string | undefined;
-    let sessionAdapter: string | undefined;
-
-    if (daemonRunning) {
-      try {
-        const session = await client.call<SessionRecord>("session.status", {
-          id,
-        });
-        sessionCwd = session.cwd;
-        sessionAdapter = session.adapter;
-      } catch {
-        // Fall through to adapter
-      }
-    }
-
-    if (!sessionCwd) {
-      const adapter = getAdapter();
-      try {
-        const session = await adapter.status(id);
-        sessionCwd = session.cwd;
-        sessionAdapter = session.adapter;
-      } catch (err) {
-        console.error(`Session not found: ${(err as Error).message}`);
-        process.exit(1);
-      }
-    }
-
-    if (!sessionCwd) {
-      console.error("Cannot determine session working directory");
-      process.exit(1);
-    }
-
-    const hooks: LifecycleHooks | undefined =
-      opts.preMerge || opts.postMerge
-        ? { preMerge: opts.preMerge, postMerge: opts.postMerge }
-        : undefined;
-
-    // Pre-merge hook
-    if (hooks?.preMerge) {
-      await runHook(hooks, "preMerge", {
-        sessionId: id,
-        cwd: sessionCwd,
-        adapter: sessionAdapter || "claude-code",
-      });
-    }
-
-    const result = await mergeSession({
-      cwd: sessionCwd,
-      message: opts.message,
-      removeWorktree: opts.removeWorktree,
-      repoPath: opts.repo,
-    });
-
-    if (result.committed) console.log("Changes committed");
-    if (result.pushed) console.log("Pushed to remote");
-    if (result.prUrl) console.log(`PR: ${result.prUrl}`);
-    if (result.worktreeRemoved) console.log("Worktree removed");
-
-    if (!result.committed && !result.pushed) {
-      console.log("No changes to commit or push");
-    }
-
-    // Post-merge hook
-    if (hooks?.postMerge) {
-      await runHook(hooks, "postMerge", {
-        sessionId: id,
-        cwd: sessionCwd,
-        adapter: sessionAdapter || "claude-code",
-      });
-    }
-  });
-
 // --- Worktree subcommand ---
 
 const worktreeCmd = new Command("worktree").description(
@@ -995,7 +905,7 @@ program
 
 program
   .command("fuses")
-  .description("List active Kind cluster fuse timers")
+  .description("List active fuse timers")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     try {
@@ -1011,7 +921,7 @@ program
       printTable(
         fuses.map((f) => ({
           Directory: shortenPath(f.directory),
-          Cluster: f.clusterName,
+          Label: f.label || "-",
           "Expires In": formatDuration(
             new Date(f.expiresAt).getTime() - Date.now(),
           ),

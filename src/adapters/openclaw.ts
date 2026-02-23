@@ -332,18 +332,16 @@ export class OpenClawAdapter implements AgentAdapter {
     }
 
     return result.sessions.map((row) => {
-      const now = Date.now();
       const updatedAt = row.updatedAt ?? 0;
-      const ageMs = now - updatedAt;
-      const isActive = updatedAt > 0 && ageMs < 5 * 60 * 1000;
-
       const model = row.model || result.defaults.model || undefined;
       const input = row.inputTokens ?? 0;
       const output = row.outputTokens ?? 0;
 
+      // Gateway is the source of truth: if a session is in the list, it's alive.
+      // Don't guess from timestamps — sessions can be idle for hours between messages.
       return {
         id: row.sessionId || row.key,
-        status: isActive ? "running" : ("stopped" as const),
+        status: "running" as const,
         adapter: this.id,
         model,
         startedAt: updatedAt > 0 ? new Date(updatedAt) : new Date(),
@@ -369,19 +367,14 @@ export class OpenClawAdapter implements AgentAdapter {
         search: sessionId,
       })) as SessionsListResult;
 
-      const row = result.sessions.find(
+      // Gateway is the source of truth: if a session is in the list, it's alive.
+      return result.sessions.some(
         (s) =>
           s.sessionId === sessionId ||
           s.key === sessionId ||
           s.sessionId?.startsWith(sessionId) ||
           s.key.startsWith(sessionId),
       );
-
-      if (!row) return false;
-
-      const updatedAt = row.updatedAt ?? 0;
-      const ageMs = Date.now() - updatedAt;
-      return updatedAt > 0 && ageMs < 5 * 60 * 1000;
     } catch {
       return false;
     }
@@ -574,11 +567,12 @@ export class OpenClawAdapter implements AgentAdapter {
     row: GatewaySessionRow,
     defaults: SessionsListResult["defaults"],
   ): AgentSession {
-    const now = Date.now();
     const updatedAt = row.updatedAt ?? 0;
-    const ageMs = now - updatedAt;
+    const ageMs = Date.now() - updatedAt;
 
-    const isActive = updatedAt > 0 && ageMs < 5 * 60 * 1000;
+    // Gateway is the source of truth: if a session is in the list, it's alive.
+    // Use "running" for recently active sessions, "idle" for quiet ones.
+    const status = updatedAt > 0 && ageMs < 5 * 60 * 1000 ? "running" : "idle";
 
     const model = row.model || defaults.model || undefined;
     const input = row.inputTokens ?? 0;
@@ -587,7 +581,7 @@ export class OpenClawAdapter implements AgentAdapter {
     return {
       id: row.sessionId || row.key,
       adapter: this.id,
-      status: isActive ? "running" : "idle",
+      status,
       startedAt: updatedAt > 0 ? new Date(updatedAt) : new Date(),
       cwd: undefined,
       model,

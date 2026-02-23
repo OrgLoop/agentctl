@@ -1,15 +1,21 @@
 import { exec } from "node:child_process";
 import type { EventEmitter } from "node:events";
-import os from "node:os";
-import path from "node:path";
 import { promisify } from "node:util";
-import type { FuseTimer, SessionRecord, StateManager } from "./state.js";
+import type { FuseTimer, StateManager } from "./state.js";
 
 const execAsync = promisify(exec);
 
 export interface FuseEngineOpts {
   defaultDurationMs: number;
   emitter?: EventEmitter;
+}
+
+export interface SetFuseOpts {
+  directory: string;
+  sessionId: string;
+  ttlMs?: number;
+  onExpire?: FuseTimer["onExpire"];
+  label?: string;
 }
 
 export class FuseEngine {
@@ -24,62 +30,55 @@ export class FuseEngine {
     this.emitter = opts.emitter;
   }
 
-  /** Derive cluster name from worktree directory. Returns null if not a mono worktree. */
-  static deriveClusterName(
-    directory: string,
-  ): { clusterName: string; branch: string } | null {
-    const home = os.homedir();
-    const monoPrefix = path.join(home, "code", "mono-");
-    if (!directory.startsWith(monoPrefix)) return null;
+  /** Set a fuse for a directory. Called when a session exits or explicitly via API. */
+  setFuse(opts: SetFuseOpts): void {
+    const ttlMs = opts.ttlMs ?? this.defaultDurationMs;
 
-    const branch = directory.slice(monoPrefix.length);
-    if (!branch) return null;
-
-    return {
-      clusterName: `kindo-charlie-${branch}`,
-      branch,
-    };
-  }
-
-  /** Called when a session exits. Starts fuse if applicable. */
-  onSessionExit(session: SessionRecord): void {
-    if (!session.cwd) return;
-    const derived = FuseEngine.deriveClusterName(session.cwd);
-    if (!derived) return;
-
-    this.startFuse(
-      session.cwd,
-      derived.clusterName,
-      derived.branch,
-      session.id,
-    );
-  }
-
-  private startFuse(
-    directory: string,
-    clusterName: string,
-    branch: string,
-    sessionId: string,
-  ): void {
     // Cancel existing fuse for same directory
-    this.cancelFuse(directory, false);
+    this.cancelFuse(opts.directory, false);
 
-    const expiresAt = new Date(Date.now() + this.defaultDurationMs);
+    const expiresAt = new Date(Date.now() + ttlMs);
     const fuse: FuseTimer = {
-      directory,
-      clusterName,
-      branch,
+      directory: opts.directory,
+      ttlMs,
       expiresAt: expiresAt.toISOString(),
-      sessionId,
+      sessionId: opts.sessionId,
+      onExpire: opts.onExpire,
+      label: opts.label,
     };
 
     this.state.addFuse(fuse);
 
-    const timeout = setTimeout(
-      () => this.fireFuse(fuse),
-      this.defaultDurationMs,
-    );
+    const timeout = setTimeout(() => this.fireFuse(fuse), ttlMs);
+    this.timers.set(opts.directory, timeout);
+
+    this.emitter?.emit("fuse.set", fuse);
+  }
+
+  /** Extend an existing fuse's TTL. Resets the timer to a new duration. */
+  extendFuse(directory: string, ttlMs?: number): boolean {
+    const existing = this.state
+      .getFuses()
+      .find((f) => f.directory === directory);
+    if (!existing) return false;
+
+    const duration = ttlMs ?? existing.ttlMs;
+    this.cancelFuse(directory, false);
+
+    const expiresAt = new Date(Date.now() + duration);
+    const fuse: FuseTimer = {
+      ...existing,
+      ttlMs: duration,
+      expiresAt: expiresAt.toISOString(),
+    };
+
+    this.state.addFuse(fuse);
+
+    const timeout = setTimeout(() => this.fireFuse(fuse), duration);
     this.timers.set(directory, timeout);
+
+    this.emitter?.emit("fuse.extended", fuse);
+    return true;
   }
 
   /** Cancel fuse for a directory. */
@@ -111,32 +110,56 @@ export class FuseEngine {
     }
   }
 
-  /** Fire a fuse — delete the Kind cluster. */
+  /** Fire a fuse — execute the configured on-expire action. */
   private async fireFuse(fuse: FuseTimer): Promise<void> {
     this.timers.delete(fuse.directory);
     this.state.removeFuse(fuse.directory);
 
-    console.log(`Fuse fired: deleting cluster ${fuse.clusterName}`);
+    const label = fuse.label || fuse.directory;
+    console.log(`Fuse expired: ${label}`);
 
-    try {
-      // Best effort: yarn local:down first
+    this.emitter?.emit("fuse.expired", fuse);
+
+    const action = fuse.onExpire;
+    if (!action) return;
+
+    // Execute on-expire script
+    if (action.script) {
       try {
-        await execAsync("yarn local:down", {
+        await execAsync(action.script, {
           cwd: fuse.directory,
-          timeout: 60_000,
+          timeout: 120_000,
         });
-      } catch {
-        // Ignore
+        console.log(`Fuse action completed: ${label}`);
+      } catch (err) {
+        console.error(`Fuse action failed for ${label}:`, err);
       }
+    }
 
-      await execAsync(`kind delete cluster --name ${fuse.clusterName}`, {
-        timeout: 120_000,
-      });
-      console.log(`Cluster ${fuse.clusterName} deleted`);
+    // POST to webhook
+    if (action.webhook) {
+      try {
+        const body = JSON.stringify({
+          type: "fuse.expired",
+          directory: fuse.directory,
+          sessionId: fuse.sessionId,
+          label: fuse.label,
+          expiredAt: new Date().toISOString(),
+        });
+        await fetch(action.webhook, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          signal: AbortSignal.timeout(30_000),
+        });
+      } catch (err) {
+        console.error(`Fuse webhook failed for ${label}:`, err);
+      }
+    }
 
-      this.emitter?.emit("fuse.fired", fuse);
-    } catch (err) {
-      console.error(`Failed to delete cluster ${fuse.clusterName}:`, err);
+    // Emit named event
+    if (action.event) {
+      this.emitter?.emit(action.event, fuse);
     }
   }
 

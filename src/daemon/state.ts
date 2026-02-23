@@ -38,11 +38,22 @@ export interface Lock {
 }
 
 export interface FuseTimer {
-  directory: string; // absolute path of the worktree
-  clusterName: string; // e.g. "kindo-charlie-feature-x"
-  branch: string; // extracted branch name
+  directory: string; // absolute path (scope of the fuse)
+  ttlMs: number; // configured TTL in milliseconds
   expiresAt: string; // ISO 8601
   sessionId: string; // session that triggered the fuse
+  /** On-expire action: shell command, webhook URL, or event name */
+  onExpire?: FuseAction;
+  label?: string; // optional human-readable label
+}
+
+export interface FuseAction {
+  /** Shell script to run when fuse expires. CWD is the fuse directory. */
+  script?: string;
+  /** Webhook URL to POST to when fuse expires */
+  webhook?: string;
+  /** Event name to emit when fuse expires */
+  event?: string;
 }
 
 export interface PersistedState {

@@ -111,8 +111,8 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   const metrics = new MetricsRegistry(sessionTracker, lockManager, fuseEngine);
 
   // Wire up events
-  emitter.on("fuse.fired", () => {
-    metrics.recordFuseFired();
+  emitter.on("fuse.expired", () => {
+    metrics.recordFuseExpired();
   });
 
   // 9. Validate all sessions on startup — mark dead ones as stopped (#40)
@@ -432,10 +432,9 @@ function createRequestHandler(ctx: HandlerContext) {
         // Remove auto-lock
         ctx.lockManager.autoUnlock(session.id);
 
-        // Mark stopped and start fuse if applicable
+        // Mark stopped
         const stopped = ctx.sessionTracker.onSessionExit(session.id);
         if (stopped) {
-          ctx.fuseEngine.onSessionExit(stopped);
           ctx.metrics.recordSessionStopped();
         }
 
@@ -473,6 +472,28 @@ function createRequestHandler(ctx: HandlerContext) {
 
       case "fuse.list":
         return ctx.fuseEngine.listActive();
+
+      case "fuse.set":
+        ctx.fuseEngine.setFuse({
+          directory: params.directory as string,
+          sessionId: params.sessionId as string,
+          ttlMs: params.ttlMs as number | undefined,
+          onExpire: params.onExpire as
+            | { script?: string; webhook?: string; event?: string }
+            | undefined,
+          label: params.label as string | undefined,
+        });
+        return null;
+
+      case "fuse.extend": {
+        const extended = ctx.fuseEngine.extendFuse(
+          params.directory as string,
+          params.ttlMs as number | undefined,
+        );
+        if (!extended)
+          throw new Error(`No active fuse for directory: ${params.directory}`);
+        return null;
+      }
 
       case "fuse.cancel":
         ctx.fuseEngine.cancelFuse(params.directory as string);

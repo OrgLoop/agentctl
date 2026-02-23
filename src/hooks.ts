@@ -4,7 +4,7 @@ import type { LifecycleHooks } from "./core/types.js";
 
 const execAsync = promisify(exec);
 
-export type HookPhase = "onCreate" | "onComplete" | "preMerge" | "postMerge";
+export type HookPhase = "onCreate" | "onComplete";
 
 export interface HookContext {
   sessionId: string;

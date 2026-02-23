@@ -34,12 +34,11 @@ npm run lint:fix   # biome check --write
 - `src/matrix-parser.ts` — YAML matrix file parser + cross-product expansion for sweep launches
 - `src/worktree.ts` — Git worktree create/list/clean utilities
 - `src/hooks.ts` — Lifecycle hook runner (env vars: SESSION_ID, CWD, ADAPTER, BRANCH, EXIT_CODE, GROUP, MODEL)
-- `src/merge.ts` — Git commit/push/PR for sessions
 - `src/cli.ts` — CLI entry point (commander)
 - `src/daemon/server.ts` — Daemon: Unix socket server + HTTP metrics
 - `src/daemon/session-tracker.ts` — Session lifecycle tracking
 - `src/daemon/lock-manager.ts` — Auto + manual directory locks
-- `src/daemon/fuse-engine.ts` — Kind cluster fuse timers
+- `src/daemon/fuse-engine.ts` — Generic directory-scoped TTL fuse timers with configurable on-expire actions
 - `src/daemon/metrics.ts` — Prometheus metrics registry
 - `src/daemon/state.ts` — State persistence layer
 - `src/client/daemon-client.ts` — Unix socket client for CLI
