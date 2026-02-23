@@ -112,6 +112,7 @@ function formatSession(
   const row: Record<string, string> = {
     ID: s.id.slice(0, 8),
     Status: s.status,
+    Adapter: s.adapter || "-",
     Model: s.model || "-",
   };
   if (showGroup) row.Group = s.group || "-";
@@ -129,6 +130,7 @@ function formatRecord(
   const row: Record<string, string> = {
     ID: s.id.slice(0, 8),
     Status: s.status,
+    Adapter: s.adapter || "-",
     Model: s.model || "-",
   };
   if (showGroup) row.Group = s.group || "-";
