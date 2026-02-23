@@ -14,6 +14,7 @@ import type {
   PeekOpts,
   StopOpts,
 } from "../core/types.js";
+import { readHead, readTail } from "../utils/partial-read.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -235,10 +236,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
+    // Capture stderr to the same log file for debugging launch failures
     const child = spawn("claude", args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, "ignore"],
+      stdio: ["ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -481,12 +483,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         continue;
       }
 
-      // Read first few lines for prompt and cwd
+      // Read first few lines for prompt and cwd (only first 8KB, not entire file)
       let firstPrompt = "";
       let sessionCwd = "";
       try {
-        const content = await fs.readFile(fullPath, "utf-8");
-        for (const l of content.split("\n").slice(0, 20)) {
+        const headLines = await readHead(fullPath, 20, 8192);
+        for (const l of headLines) {
           try {
             const msg = JSON.parse(l);
             if (msg.cwd && !sessionCwd) sessionCwd = msg.cwd;
@@ -704,15 +706,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     jsonlPath: string,
   ): Promise<{ model?: string; tokens?: { in: number; out: number } }> {
     try {
-      const content = await fs.readFile(jsonlPath, "utf-8");
-      const lines = content.trim().split("\n");
-
       let model: string | undefined;
       let totalIn = 0;
       let totalOut = 0;
 
-      // Read from the end for efficiency — last 100 lines
-      const tail = lines.slice(-100);
+      // Read only the last 64KB for the tail (not entire file)
+      const tail = await readTail(jsonlPath, 100, 65536);
       for (const line of tail) {
         try {
           const msg = JSON.parse(line) as JSONLMessage;
@@ -730,7 +729,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
       // Also scan first few lines for model if we didn't find it
       if (!model) {
-        const head = lines.slice(0, 20);
+        const head = await readHead(jsonlPath, 20, 8192);
         for (const line of head) {
           try {
             const msg = JSON.parse(line) as JSONLMessage;
