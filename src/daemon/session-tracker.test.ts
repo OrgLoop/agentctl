@@ -19,7 +19,12 @@ beforeEach(async () => {
 afterEach(async () => {
   tracker.stopLaunchCleanup();
   state.flush();
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(tmpDir, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 100,
+  });
 });
 
 function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
@@ -429,6 +434,7 @@ describe("SessionTracker", () => {
       expect(onDead).toHaveBeenCalledWith("s1");
 
       deadTracker.stopLaunchCleanup();
+      state.flush();
       vi.useRealTimers();
     });
   });
