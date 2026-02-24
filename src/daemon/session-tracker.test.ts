@@ -19,7 +19,16 @@ beforeEach(async () => {
 afterEach(async () => {
   tracker.stopLaunchCleanup();
   state.flush();
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  try {
+    await fs.rm(tmpDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 200,
+    });
+  } catch {
+    // Ignore cleanup failures — temp dir will be cleaned by OS
+  }
 });
 
 function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
