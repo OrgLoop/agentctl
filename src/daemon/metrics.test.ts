@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FuseEngine } from "./fuse-engine.js";
 import { LockManager } from "./lock-manager.js";
 import { MetricsRegistry } from "./metrics.js";
-import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
 let tmpDir: string;
@@ -13,15 +12,13 @@ let state: StateManager;
 let metrics: MetricsRegistry;
 let lockManager: LockManager;
 let fuseEngine: FuseEngine;
-let sessionTracker: SessionTracker;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-metrics-test-"));
   state = await StateManager.load(tmpDir);
   lockManager = new LockManager(state);
   fuseEngine = new FuseEngine(state, { defaultDurationMs: 600000 });
-  sessionTracker = new SessionTracker(state, { adapters: {} });
-  metrics = new MetricsRegistry(sessionTracker, lockManager, fuseEngine);
+  metrics = new MetricsRegistry(lockManager, fuseEngine);
 });
 
 afterEach(async () => {
@@ -114,6 +111,12 @@ describe("MetricsRegistry", () => {
       const output = metrics.generateMetrics();
       expect(output).toContain('agentctl_locks_active{type="auto"} 2');
       expect(output).toContain('agentctl_locks_active{type="manual"} 1');
+    });
+
+    it("reflects active session count set by session.list", () => {
+      metrics.setActiveSessionCount(5);
+      const output = metrics.generateMetrics();
+      expect(output).toContain("agentctl_sessions_active 5");
     });
   });
 });

@@ -7,256 +7,63 @@ import type { SessionRecord, StateManager } from "./state.js";
 
 export interface SessionTrackerOpts {
   adapters: Record<string, AgentAdapter>;
-  pollIntervalMs?: number;
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
 }
 
-/** Max age for stopped sessions in state before pruning (7 days) */
-const STOPPED_SESSION_PRUNE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Grace period for recently-launched sessions.
+ * If a session was launched less than this many ms ago and the adapter
+ * doesn't return it yet, don't mark it stopped — the adapter may not
+ * have discovered it yet.
+ */
+const LAUNCH_GRACE_PERIOD_MS = 30_000;
 
+/**
+ * Simplified session tracker for the stateless daemon core (ADR 004).
+ *
+ * Adapters own session truth. The daemon only tracks:
+ * - Launch metadata (prompt, group, spec, cwd) for sessions launched via agentctl
+ * - Locks and fuses (handled by LockManager / FuseEngine)
+ *
+ * The old polling loop, pruning, and state-based session registry are removed.
+ * session.list now fans out adapter.discover() at call time.
+ */
 export class SessionTracker {
   private state: StateManager;
   private adapters: Record<string, AgentAdapter>;
-  private pollIntervalMs: number;
-  private pollHandle: ReturnType<typeof setInterval> | null = null;
-  private polling = false;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private cleanupHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
     this.adapters = opts.adapters;
-    this.pollIntervalMs = opts.pollIntervalMs ?? 5000;
     this.isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
   }
 
-  startPolling(): void {
-    if (this.pollHandle) return;
-    // Prune old stopped sessions on startup
-    this.pruneOldSessions();
-    // Initial poll
-    this.guardedPoll();
-    this.pollHandle = setInterval(() => {
-      this.guardedPoll();
-    }, this.pollIntervalMs);
-  }
-
-  /** Run poll() with a guard to skip if the previous cycle is still running */
-  private guardedPoll(): void {
-    if (this.polling) return;
-    this.polling = true;
-    this.poll()
-      .catch((err) => console.error("Poll error:", err))
-      .finally(() => {
-        this.polling = false;
-      });
-  }
-
-  stopPolling(): void {
-    if (this.pollHandle) {
-      clearInterval(this.pollHandle);
-      this.pollHandle = null;
-    }
-  }
-
-  private async poll(): Promise<void> {
-    // Collect PIDs from all adapter-discovered sessions (the source of truth)
-    const adapterPidToId = new Map<number, string>();
-
-    for (const [adapterName, adapter] of Object.entries(this.adapters)) {
-      try {
-        // Discover-first: adapter.discover() is the ground truth
-        const discovered = await adapter.discover();
-        for (const disc of discovered) {
-          if (disc.pid) {
-            adapterPidToId.set(disc.pid, disc.id);
-          }
-
-          const existing = this.state.getSession(disc.id);
-          const record = discoveredToRecord(disc, adapterName);
-
-          if (!existing) {
-            this.state.setSession(disc.id, record);
-          } else if (
-            existing.status !== record.status ||
-            (!existing.model && record.model)
-          ) {
-            // Status changed or model resolved — update, preserving metadata
-            this.state.setSession(disc.id, {
-              ...existing,
-              status: record.status,
-              stoppedAt: record.stoppedAt,
-              model: record.model || existing.model,
-              tokens: record.tokens,
-              cost: record.cost,
-              prompt: record.prompt || existing.prompt,
-              pid: record.pid,
-            });
-          }
-        }
-      } catch {
-        // Adapter unavailable — skip
-      }
-    }
-
-    // Reap stale entries from daemon state
-    this.reapStaleEntries(adapterPidToId);
-  }
-
   /**
-   * Clean up ghost sessions in the daemon state:
-   * - pending-* entries whose PID matches a resolved session → remove pending
-   * - Any "running"/"idle" session in state whose PID is dead → mark stopped
+   * Start periodic PID liveness check for daemon-launched sessions.
+   * This is a lightweight check (no adapter fan-out) that runs every 30s
+   * to detect dead sessions and return their IDs for lock cleanup.
    */
-  private reapStaleEntries(adapterPidToId: Map<number, string>): void {
-    const sessions = this.state.getSessions();
-
-    for (const [id, record] of Object.entries(sessions)) {
-      // Bug 2: If this is a pending-* entry and a real session has the same PID,
-      // the pending entry is stale — remove it
-      if (id.startsWith("pending-") && record.pid) {
-        const resolvedId = adapterPidToId.get(record.pid);
-        if (resolvedId && resolvedId !== id) {
-          this.state.removeSession(id);
-          continue;
-        }
+  startLaunchCleanup(onDead?: (sessionId: string) => void): void {
+    if (this.cleanupHandle) return;
+    this.cleanupHandle = setInterval(() => {
+      const dead = this.cleanupDeadLaunches();
+      if (onDead) {
+        for (const id of dead) onDead(id);
       }
+    }, 30_000);
+  }
 
-      // Bug 1: If session is "running"/"idle" but PID is dead, mark stopped
-      if (
-        (record.status === "running" || record.status === "idle") &&
-        record.pid
-      ) {
-        // Only reap if the adapter didn't return this session as running
-        // (adapter is the source of truth for sessions it knows about)
-        const adapterId = adapterPidToId.get(record.pid);
-        if (adapterId === id) continue; // Adapter confirmed this PID is active
-
-        if (!this.isProcessAlive(record.pid)) {
-          this.state.setSession(id, {
-            ...record,
-            status: "stopped",
-            stoppedAt: new Date().toISOString(),
-          });
-        }
-      }
+  stopLaunchCleanup(): void {
+    if (this.cleanupHandle) {
+      clearInterval(this.cleanupHandle);
+      this.cleanupHandle = null;
     }
   }
 
-  /**
-   * Validate all sessions on daemon startup (#40).
-   * Any session marked as "running" or "idle" whose PID is dead gets
-   * immediately marked as "stopped". This prevents unbounded growth of
-   * ghost sessions across daemon restarts.
-   */
-  validateAllSessions(): void {
-    const sessions = this.state.getSessions();
-    let cleaned = 0;
-
-    for (const [id, record] of Object.entries(sessions)) {
-      if (record.status !== "running" && record.status !== "idle") continue;
-
-      if (record.pid) {
-        if (!this.isProcessAlive(record.pid)) {
-          this.state.setSession(id, {
-            ...record,
-            status: "stopped",
-            stoppedAt: new Date().toISOString(),
-          });
-          cleaned++;
-        }
-      } else {
-        // No PID recorded — can't verify, mark as stopped
-        this.state.setSession(id, {
-          ...record,
-          status: "stopped",
-          stoppedAt: new Date().toISOString(),
-        });
-        cleaned++;
-      }
-    }
-
-    if (cleaned > 0) {
-      console.error(
-        `Validated sessions on startup: marked ${cleaned} dead sessions as stopped`,
-      );
-    }
-  }
-
-  /**
-   * Aggressively prune all clearly-dead sessions (#40).
-   * Returns the number of sessions pruned.
-   * Called via `agentctl prune` command.
-   */
-  pruneDeadSessions(): number {
-    const sessions = this.state.getSessions();
-    let pruned = 0;
-
-    for (const [id, record] of Object.entries(sessions)) {
-      // Remove stopped/completed/failed sessions older than 24h
-      if (
-        record.status === "stopped" ||
-        record.status === "completed" ||
-        record.status === "failed"
-      ) {
-        const stoppedAt = record.stoppedAt
-          ? new Date(record.stoppedAt).getTime()
-          : new Date(record.startedAt).getTime();
-        const age = Date.now() - stoppedAt;
-        if (age > 24 * 60 * 60 * 1000) {
-          this.state.removeSession(id);
-          pruned++;
-        }
-        continue;
-      }
-
-      // Remove running/idle sessions whose PID is dead
-      if (record.status === "running" || record.status === "idle") {
-        if (record.pid && !this.isProcessAlive(record.pid)) {
-          this.state.removeSession(id);
-          pruned++;
-        } else if (!record.pid) {
-          this.state.removeSession(id);
-          pruned++;
-        }
-      }
-    }
-
-    return pruned;
-  }
-
-  /**
-   * Remove stopped sessions from state that have been stopped for more than 7 days.
-   * This reduces overhead from accumulating hundreds of historical sessions.
-   */
-  private pruneOldSessions(): void {
-    const sessions = this.state.getSessions();
-    const now = Date.now();
-    let pruned = 0;
-
-    for (const [id, record] of Object.entries(sessions)) {
-      if (
-        record.status !== "stopped" &&
-        record.status !== "completed" &&
-        record.status !== "failed"
-      ) {
-        continue;
-      }
-      const stoppedAt = record.stoppedAt
-        ? new Date(record.stoppedAt).getTime()
-        : new Date(record.startedAt).getTime();
-      if (now - stoppedAt > STOPPED_SESSION_PRUNE_AGE_MS) {
-        this.state.removeSession(id);
-        pruned++;
-      }
-    }
-
-    if (pruned > 0) {
-      console.error(`Pruned ${pruned} sessions stopped >7 days ago from state`);
-    }
-  }
-
-  /** Track a newly launched session */
+  /** Track a newly launched session (stores launch metadata in state) */
   track(session: AgentSession, adapterName: string): SessionRecord {
     const record = sessionToRecord(session, adapterName);
 
@@ -274,7 +81,7 @@ export class SessionTracker {
     return record;
   }
 
-  /** Get session record by id (exact or prefix) */
+  /** Get session launch metadata by id (exact or prefix match) */
   getSession(id: string): SessionRecord | undefined {
     // Exact match
     const exact = this.state.getSession(id);
@@ -289,62 +96,12 @@ export class SessionTracker {
     return undefined;
   }
 
-  /** List all tracked sessions */
-  listSessions(opts?: {
-    status?: string;
-    all?: boolean;
-    adapter?: string;
-  }): SessionRecord[] {
-    const sessions = Object.values(this.state.getSessions());
-
-    // Liveness check: mark sessions with dead PIDs as stopped
-    for (const s of sessions) {
-      if ((s.status === "running" || s.status === "idle") && s.pid) {
-        if (!this.isProcessAlive(s.pid)) {
-          s.status = "stopped";
-          s.stoppedAt = new Date().toISOString();
-          this.state.setSession(s.id, s);
-        }
-      }
-    }
-
-    let filtered = sessions;
-
-    if (opts?.adapter) {
-      filtered = filtered.filter((s) => s.adapter === opts.adapter);
-    }
-
-    if (opts?.status) {
-      filtered = filtered.filter((s) => s.status === opts.status);
-    } else if (!opts?.all) {
-      filtered = filtered.filter(
-        (s) => s.status === "running" || s.status === "idle",
-      );
-    }
-
-    // Dedup: if a pending-* entry shares a PID with a resolved entry, show only the resolved one
-    filtered = deduplicatePendingSessions(filtered);
-
-    return filtered.sort((a, b) => {
-      // Running first, then by recency
-      if (a.status === "running" && b.status !== "running") return -1;
-      if (b.status === "running" && a.status !== "running") return 1;
-      return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
-    });
-  }
-
-  activeCount(): number {
-    return Object.values(this.state.getSessions()).filter(
-      (s) => s.status === "running" || s.status === "idle",
-    ).length;
-  }
-
-  /** Remove a session from state entirely (used for ghost cleanup) */
+  /** Remove a session from launch metadata */
   removeSession(sessionId: string): void {
     this.state.removeSession(sessionId);
   }
 
-  /** Called when a session stops — returns the cwd for fuse/lock processing */
+  /** Called when a session stops — marks it in launch metadata, returns the record */
   onSessionExit(sessionId: string): SessionRecord | undefined {
     const session = this.state.getSession(sessionId);
     if (session) {
@@ -353,6 +110,110 @@ export class SessionTracker {
       this.state.setSession(sessionId, session);
     }
     return session;
+  }
+
+  /**
+   * Merge adapter-discovered sessions with daemon launch metadata.
+   *
+   * 1. Enrich discovered sessions with launch metadata (prompt, group, spec, etc.)
+   * 2. Reconcile: mark daemon-launched sessions as stopped if their adapter
+   *    succeeded but didn't return them (and they're past the grace period).
+   * 3. Include recently-launched sessions that adapters haven't discovered yet.
+   *
+   * Returns the merged session list and IDs of sessions that were marked stopped
+   * (for lock cleanup by the caller).
+   */
+  reconcileAndEnrich(
+    discovered: DiscoveredSession[],
+    succeededAdapters: Set<string>,
+  ): { sessions: SessionRecord[]; stoppedLaunchIds: string[] } {
+    // Build lookups for discovered sessions
+    const discoveredIds = new Set(discovered.map((d) => d.id));
+    const discoveredPids = new Map<number, string>();
+    for (const d of discovered) {
+      if (d.pid) discoveredPids.set(d.pid, d.id);
+    }
+
+    // 1. Convert discovered sessions to records, enriching with launch metadata
+    const sessions: SessionRecord[] = discovered.map((disc) =>
+      enrichDiscovered(disc, this.state.getSession(disc.id)),
+    );
+
+    // 2. Reconcile daemon-launched sessions that disappeared from adapter results
+    const stoppedLaunchIds: string[] = [];
+    const now = Date.now();
+
+    for (const [id, record] of Object.entries(this.state.getSessions())) {
+      if (
+        record.status !== "running" &&
+        record.status !== "idle" &&
+        record.status !== "pending"
+      )
+        continue;
+
+      // If adapter for this session didn't succeed, include as-is from launch metadata
+      // (we can't verify status, so trust the last-known state)
+      if (!succeededAdapters.has(record.adapter)) {
+        sessions.push(record);
+        continue;
+      }
+
+      // Skip if adapter returned this session (it's still active)
+      if (discoveredIds.has(id)) continue;
+
+      // Check if this session's PID was resolved to a different ID (pending→UUID)
+      if (record.pid && discoveredPids.has(record.pid)) {
+        // PID was resolved to a real session — remove stale launch entry
+        this.state.removeSession(id);
+        stoppedLaunchIds.push(id);
+        continue;
+      }
+
+      // Grace period: don't mark recently-launched sessions as stopped
+      const launchAge = now - new Date(record.startedAt).getTime();
+      if (launchAge < LAUNCH_GRACE_PERIOD_MS) {
+        // Still within grace period — include as-is in results
+        sessions.push(record);
+        continue;
+      }
+
+      // Session disappeared from adapter results — mark stopped
+      this.state.setSession(id, {
+        ...record,
+        status: "stopped",
+        stoppedAt: new Date().toISOString(),
+      });
+      stoppedLaunchIds.push(id);
+    }
+
+    return { sessions, stoppedLaunchIds };
+  }
+
+  /**
+   * Check PID liveness for daemon-launched sessions.
+   * Returns IDs of sessions whose PIDs have died.
+   * This is a lightweight check (no adapter fan-out) for lock cleanup.
+   */
+  cleanupDeadLaunches(): string[] {
+    const dead: string[] = [];
+    for (const [id, record] of Object.entries(this.state.getSessions())) {
+      if (
+        record.status !== "running" &&
+        record.status !== "idle" &&
+        record.status !== "pending"
+      )
+        continue;
+
+      if (record.pid && !this.isProcessAlive(record.pid)) {
+        this.state.setSession(id, {
+          ...record,
+          status: "stopped",
+          stoppedAt: new Date().toISOString(),
+        });
+        dead.push(id);
+      }
+    }
+    return dead;
   }
 }
 
@@ -367,24 +228,28 @@ function defaultIsProcessAlive(pid: number): boolean {
 }
 
 /**
- * Remove pending-* entries that share a PID with a resolved (non-pending) session.
- * This is a safety net for list output — the poll() reaper handles cleanup in state.
+ * Convert a discovered session to a SessionRecord, enriching with launch metadata.
  */
-function deduplicatePendingSessions(
-  sessions: SessionRecord[],
-): SessionRecord[] {
-  const realPids = new Set<number>();
-  for (const s of sessions) {
-    if (!s.id.startsWith("pending-") && s.pid) {
-      realPids.add(s.pid);
-    }
-  }
-  return sessions.filter((s) => {
-    if (s.id.startsWith("pending-") && s.pid && realPids.has(s.pid)) {
-      return false;
-    }
-    return true;
-  });
+function enrichDiscovered(
+  disc: DiscoveredSession,
+  launchMeta: SessionRecord | undefined,
+): SessionRecord {
+  return {
+    id: disc.id,
+    adapter: disc.adapter,
+    status: disc.status as SessionRecord["status"],
+    startedAt: disc.startedAt?.toISOString() ?? new Date().toISOString(),
+    stoppedAt: disc.stoppedAt?.toISOString(),
+    cwd: disc.cwd ?? launchMeta?.cwd,
+    model: disc.model ?? launchMeta?.model,
+    prompt: disc.prompt ?? launchMeta?.prompt,
+    tokens: disc.tokens,
+    cost: disc.cost,
+    pid: disc.pid,
+    spec: launchMeta?.spec,
+    group: launchMeta?.group,
+    meta: disc.nativeMetadata ?? launchMeta?.meta ?? {},
+  };
 }
 
 function sessionToRecord(
@@ -406,26 +271,5 @@ function sessionToRecord(
     pid: session.pid,
     group: session.group,
     meta: session.meta,
-  };
-}
-
-/** Convert a DiscoveredSession (adapter ground truth) to a SessionRecord for state */
-function discoveredToRecord(
-  disc: DiscoveredSession,
-  adapterName: string,
-): SessionRecord {
-  return {
-    id: disc.id,
-    adapter: adapterName,
-    status: disc.status,
-    startedAt: disc.startedAt?.toISOString() ?? new Date().toISOString(),
-    stoppedAt: disc.stoppedAt?.toISOString(),
-    cwd: disc.cwd,
-    model: disc.model,
-    prompt: disc.prompt,
-    tokens: disc.tokens,
-    cost: disc.cost,
-    pid: disc.pid,
-    meta: disc.nativeMetadata ?? {},
   };
 }

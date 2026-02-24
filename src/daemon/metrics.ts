@@ -1,6 +1,5 @@
 import type { FuseEngine } from "./fuse-engine.js";
 import type { LockManager } from "./lock-manager.js";
-import type { SessionTracker } from "./session-tracker.js";
 
 export class MetricsRegistry {
   sessionsTotalCompleted = 0;
@@ -9,11 +8,22 @@ export class MetricsRegistry {
   fusesExpiredTotal = 0;
   sessionDurations: number[] = []; // seconds
 
+  /** Last-known active session count, updated by session.list fan-out */
+  private _activeSessionCount = 0;
+
   constructor(
-    private sessionTracker: SessionTracker,
     private lockManager: LockManager,
     private fuseEngine: FuseEngine,
   ) {}
+
+  /** Update the active session gauge (called after session.list fan-out) */
+  setActiveSessionCount(count: number): void {
+    this._activeSessionCount = count;
+  }
+
+  get activeSessionCount(): number {
+    return this._activeSessionCount;
+  }
 
   recordSessionCompleted(durationSeconds?: number): void {
     this.sessionsTotalCompleted++;
@@ -53,7 +63,7 @@ export class MetricsRegistry {
     g(
       "agentctl_sessions_active",
       "Number of active sessions",
-      this.sessionTracker.activeCount(),
+      this._activeSessionCount,
     );
 
     const locks = this.lockManager.listAll();

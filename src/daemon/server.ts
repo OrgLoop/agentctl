@@ -108,21 +108,30 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     emitter,
   });
   const sessionTracker = new SessionTracker(state, { adapters });
-  const metrics = new MetricsRegistry(sessionTracker, lockManager, fuseEngine);
+  const metrics = new MetricsRegistry(lockManager, fuseEngine);
 
   // Wire up events
   emitter.on("fuse.expired", () => {
     metrics.recordFuseExpired();
   });
 
-  // 9. Validate all sessions on startup — mark dead ones as stopped (#40)
-  sessionTracker.validateAllSessions();
+  // 9. Initial PID liveness cleanup for daemon-launched sessions
+  //    (replaces the old validateAllSessions — much simpler, only checks launches)
+  const initialDead = sessionTracker.cleanupDeadLaunches();
+  if (initialDead.length > 0) {
+    for (const id of initialDead) lockManager.autoUnlock(id);
+    console.error(
+      `Startup cleanup: marked ${initialDead.length} dead launches as stopped`,
+    );
+  }
 
   // 10. Resume fuse timers
   fuseEngine.resumeTimers();
 
-  // 11. Start session polling
-  sessionTracker.startPolling();
+  // 11. Start periodic PID liveness check for lock cleanup (30s interval)
+  sessionTracker.startLaunchCleanup((deadId) => {
+    lockManager.autoUnlock(deadId);
+  });
 
   // 12. Create request handler
   const handleRequest = createRequestHandler({
@@ -199,7 +208,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
 
   // Shutdown function
   const shutdown = async () => {
-    sessionTracker.stopPolling();
+    sessionTracker.stopLaunchCleanup();
     fuseEngine.shutdown();
     state.flush();
     await state.persist();
@@ -324,20 +333,146 @@ function createRequestHandler(ctx: HandlerContext) {
 
     switch (req.method) {
       case "session.list": {
-        let sessions = ctx.sessionTracker.listSessions({
-          status: params.status as string | undefined,
-          all: params.all as boolean | undefined,
-        });
-        if (params.group) {
-          sessions = sessions.filter((s) => s.group === params.group);
+        const adapterFilter = params.adapter as string | undefined;
+        const statusFilter = params.status as string | undefined;
+        const showAll = params.all as boolean | undefined;
+        const groupFilter = params.group as string | undefined;
+
+        // Fan out discover() to adapters (or just one if filtered)
+        const adapterEntries = adapterFilter
+          ? Object.entries(ctx.adapters).filter(
+              ([name]) => name === adapterFilter,
+            )
+          : Object.entries(ctx.adapters);
+
+        const ADAPTER_TIMEOUT_MS = 5000;
+        const succeededAdapters = new Set<string>();
+
+        const results = await Promise.allSettled(
+          adapterEntries.map(([name, adapter]) =>
+            Promise.race([
+              adapter.discover().then((sessions) => {
+                succeededAdapters.add(name);
+                return sessions.map((s) => ({ ...s, adapter: name }));
+              }),
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () => reject(new Error(`Adapter ${name} timed out`)),
+                  ADAPTER_TIMEOUT_MS,
+                ),
+              ),
+            ]),
+          ),
+        );
+
+        // Merge fulfilled results, skip failed adapters
+        const discovered: import("../core/types.js").DiscoveredSession[] =
+          results
+            .filter(
+              (
+                r,
+              ): r is PromiseFulfilledResult<
+                import("../core/types.js").DiscoveredSession[]
+              > => r.status === "fulfilled",
+            )
+            .flatMap((r) => r.value);
+
+        // Reconcile with launch metadata and enrich
+        const { sessions: allSessions, stoppedLaunchIds } =
+          ctx.sessionTracker.reconcileAndEnrich(discovered, succeededAdapters);
+
+        // Release locks for sessions that disappeared from adapter results
+        for (const id of stoppedLaunchIds) {
+          ctx.lockManager.autoUnlock(id);
         }
+
+        // Apply filters
+        let sessions = allSessions;
+        if (statusFilter) {
+          sessions = sessions.filter((s) => s.status === statusFilter);
+        } else if (!showAll) {
+          sessions = sessions.filter(
+            (s) => s.status === "running" || s.status === "idle",
+          );
+        }
+
+        if (groupFilter) {
+          sessions = sessions.filter((s) => s.group === groupFilter);
+        }
+
+        // Sort: running first, then by most recent
+        sessions.sort((a, b) => {
+          if (a.status === "running" && b.status !== "running") return -1;
+          if (b.status === "running" && a.status !== "running") return 1;
+          return (
+            new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime()
+          );
+        });
+
+        // Update metrics gauge
+        ctx.metrics.setActiveSessionCount(
+          allSessions.filter(
+            (s) => s.status === "running" || s.status === "idle",
+          ).length,
+        );
+
         return sessions;
       }
 
       case "session.status": {
-        const session = ctx.sessionTracker.getSession(params.id as string);
-        if (!session) throw new Error(`Session not found: ${params.id}`);
-        return session;
+        const id = params.id as string;
+
+        // Check launch metadata to determine adapter
+        const launchRecord = ctx.sessionTracker.getSession(id);
+        const adapterName = (params.adapter as string) || launchRecord?.adapter;
+
+        // Determine which adapters to search
+        const adaptersToSearch = adapterName
+          ? Object.entries(ctx.adapters).filter(
+              ([name]) => name === adapterName,
+            )
+          : Object.entries(ctx.adapters);
+
+        // Search adapters for the session
+        for (const [name, adapter] of adaptersToSearch) {
+          try {
+            const discovered = await adapter.discover();
+            let match = discovered.find((d) => d.id === id);
+            // Prefix match
+            if (!match) {
+              const prefixMatches = discovered.filter((d) =>
+                d.id.startsWith(id),
+              );
+              if (prefixMatches.length === 1) match = prefixMatches[0];
+            }
+            if (match) {
+              const meta = ctx.sessionTracker.getSession(match.id);
+              return {
+                id: match.id,
+                adapter: name,
+                status: match.status,
+                startedAt:
+                  match.startedAt?.toISOString() ?? new Date().toISOString(),
+                stoppedAt: match.stoppedAt?.toISOString(),
+                cwd: match.cwd ?? meta?.cwd,
+                model: match.model ?? meta?.model,
+                prompt: match.prompt ?? meta?.prompt,
+                tokens: match.tokens,
+                cost: match.cost,
+                pid: match.pid,
+                spec: meta?.spec,
+                group: meta?.group,
+                meta: match.nativeMetadata ?? meta?.meta ?? {},
+              };
+            }
+          } catch {
+            // Adapter failed — try next
+          }
+        }
+
+        // Fall back to launch metadata if adapters didn't find it
+        if (launchRecord) return launchRecord;
+        throw new Error(`Session not found: ${id}`);
       }
 
       case "session.peek": {
@@ -408,32 +543,40 @@ function createRequestHandler(ctx: HandlerContext) {
       }
 
       case "session.stop": {
-        const session = ctx.sessionTracker.getSession(params.id as string);
-        if (!session) throw new Error(`Session not found: ${params.id}`);
+        const id = params.id as string;
+        const launchRecord = ctx.sessionTracker.getSession(id);
 
         // Ghost pending entry with dead PID: remove from state with --force
         if (
-          session.id.startsWith("pending-") &&
+          launchRecord?.id.startsWith("pending-") &&
           params.force &&
-          session.pid &&
-          !isProcessAlive(session.pid)
+          launchRecord.pid &&
+          !isProcessAlive(launchRecord.pid)
         ) {
-          ctx.lockManager.autoUnlock(session.id);
-          ctx.sessionTracker.removeSession(session.id);
+          ctx.lockManager.autoUnlock(launchRecord.id);
+          ctx.sessionTracker.removeSession(launchRecord.id);
           return null;
         }
 
-        const adapter = ctx.adapters[session.adapter];
-        if (!adapter) throw new Error(`Unknown adapter: ${session.adapter}`);
-        await adapter.stop(session.id, {
+        const adapterName = (params.adapter as string) || launchRecord?.adapter;
+        if (!adapterName)
+          throw new Error(
+            `Session not found: ${id}. Specify --adapter to stop a non-daemon session.`,
+          );
+
+        const adapter = ctx.adapters[adapterName];
+        if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
+
+        const sessionId = launchRecord?.id || id;
+        await adapter.stop(sessionId, {
           force: params.force as boolean | undefined,
         });
 
         // Remove auto-lock
-        ctx.lockManager.autoUnlock(session.id);
+        ctx.lockManager.autoUnlock(sessionId);
 
-        // Mark stopped
-        const stopped = ctx.sessionTracker.onSessionExit(session.id);
+        // Mark stopped in launch metadata
+        const stopped = ctx.sessionTracker.onSessionExit(sessionId);
         if (stopped) {
           ctx.metrics.recordSessionStopped();
         }
@@ -442,18 +585,28 @@ function createRequestHandler(ctx: HandlerContext) {
       }
 
       case "session.resume": {
-        const session = ctx.sessionTracker.getSession(params.id as string);
-        if (!session) throw new Error(`Session not found: ${params.id}`);
-        const adapter = ctx.adapters[session.adapter];
-        if (!adapter) throw new Error(`Unknown adapter: ${session.adapter}`);
-        await adapter.resume(session.id, params.message as string);
+        const id = params.id as string;
+        const launchRecord = ctx.sessionTracker.getSession(id);
+        const adapterName = (params.adapter as string) || launchRecord?.adapter;
+        if (!adapterName)
+          throw new Error(
+            `Session not found: ${id}. Specify --adapter to resume a non-daemon session.`,
+          );
+        const adapter = ctx.adapters[adapterName];
+        if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
+        await adapter.resume(launchRecord?.id || id, params.message as string);
         return null;
       }
 
-      // --- Prune command (#40) ---
+      // --- Prune command (#40) --- kept for CLI backward compat
       case "session.prune": {
-        const pruned = ctx.sessionTracker.pruneDeadSessions();
-        return { pruned };
+        // In the stateless model, there's no session registry to prune.
+        // Clean up dead launches (PID liveness check) as a best-effort action.
+        const deadIds = ctx.sessionTracker.cleanupDeadLaunches();
+        for (const id of deadIds) {
+          ctx.lockManager.autoUnlock(id);
+        }
+        return { pruned: deadIds.length };
       }
 
       case "lock.list":
@@ -503,7 +656,7 @@ function createRequestHandler(ctx: HandlerContext) {
         return {
           pid: process.pid,
           uptime: Date.now() - startTime,
-          sessions: ctx.sessionTracker.activeCount(),
+          sessions: ctx.metrics.activeSessionCount,
           locks: ctx.lockManager.listAll().length,
           fuses: ctx.fuseEngine.listActive().length,
         } satisfies DaemonStatus;

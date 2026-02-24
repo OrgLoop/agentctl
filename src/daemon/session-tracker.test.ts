@@ -1,12 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type {
-  AgentAdapter,
-  AgentSession,
-  DiscoveredSession,
-} from "../core/types.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentSession, DiscoveredSession } from "../core/types.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
@@ -21,7 +17,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  tracker.stopPolling();
+  tracker.stopLaunchCleanup();
   state.flush();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
@@ -38,9 +34,22 @@ function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
   };
 }
 
+function makeDiscovered(
+  overrides: Partial<DiscoveredSession> = {},
+): DiscoveredSession {
+  return {
+    id: "disc-1",
+    status: "running",
+    adapter: "claude-code",
+    startedAt: new Date(),
+    cwd: "/tmp/test",
+    ...overrides,
+  };
+}
+
 describe("SessionTracker", () => {
   describe("track", () => {
-    it("tracks a new session", () => {
+    it("tracks a new session as launch metadata", () => {
       const session = makeSession();
       const record = tracker.track(session, "claude-code");
 
@@ -54,6 +63,26 @@ describe("SessionTracker", () => {
       tracker.track(session, "claude-code");
 
       expect(state.getSession("test-session-1")).toBeDefined();
+    });
+
+    it("removes pending-PID entry when real session registers with same PID", () => {
+      tracker.track(
+        makeSession({ id: "pending-11111", status: "running", pid: 11111 }),
+        "claude-code",
+      );
+      expect(state.getSession("pending-11111")).toBeDefined();
+
+      tracker.track(
+        makeSession({
+          id: "real-uuid-session",
+          status: "running",
+          pid: 11111,
+        }),
+        "claude-code",
+      );
+
+      expect(state.getSession("pending-11111")).toBeUndefined();
+      expect(state.getSession("real-uuid-session")).toBeDefined();
     });
   });
 
@@ -77,92 +106,6 @@ describe("SessionTracker", () => {
     });
   });
 
-  describe("listSessions", () => {
-    it("lists all active sessions by default", () => {
-      tracker.track(
-        makeSession({ id: "s1", status: "running" }),
-        "claude-code",
-      );
-      tracker.track(makeSession({ id: "s2", status: "idle" }), "claude-code");
-      tracker.track(
-        makeSession({ id: "s3", status: "stopped" }),
-        "claude-code",
-      );
-
-      const list = tracker.listSessions();
-      expect(list).toHaveLength(2);
-      expect(list.map((s) => s.id)).toContain("s1");
-      expect(list.map((s) => s.id)).toContain("s2");
-    });
-
-    it("includes all sessions with all flag", () => {
-      tracker.track(
-        makeSession({ id: "s1", status: "running" }),
-        "claude-code",
-      );
-      tracker.track(
-        makeSession({ id: "s2", status: "stopped" }),
-        "claude-code",
-      );
-
-      const list = tracker.listSessions({ all: true });
-      expect(list).toHaveLength(2);
-    });
-
-    it("filters by status", () => {
-      tracker.track(
-        makeSession({ id: "s1", status: "running" }),
-        "claude-code",
-      );
-      tracker.track(
-        makeSession({ id: "s2", status: "stopped" }),
-        "claude-code",
-      );
-
-      const list = tracker.listSessions({ status: "stopped" });
-      expect(list).toHaveLength(1);
-      expect(list[0].id).toBe("s2");
-    });
-
-    it("sorts running sessions first", () => {
-      tracker.track(
-        makeSession({
-          id: "s1",
-          status: "idle",
-          startedAt: new Date("2025-01-02"),
-        }),
-        "claude-code",
-      );
-      tracker.track(
-        makeSession({
-          id: "s2",
-          status: "running",
-          startedAt: new Date("2025-01-01"),
-        }),
-        "claude-code",
-      );
-
-      const list = tracker.listSessions();
-      expect(list[0].id).toBe("s2"); // running comes first
-    });
-  });
-
-  describe("activeCount", () => {
-    it("counts running and idle sessions", () => {
-      tracker.track(
-        makeSession({ id: "s1", status: "running" }),
-        "claude-code",
-      );
-      tracker.track(makeSession({ id: "s2", status: "idle" }), "claude-code");
-      tracker.track(
-        makeSession({ id: "s3", status: "stopped" }),
-        "claude-code",
-      );
-
-      expect(tracker.activeCount()).toBe(2);
-    });
-  });
-
   describe("onSessionExit", () => {
     it("marks session as stopped", () => {
       tracker.track(
@@ -181,231 +124,8 @@ describe("SessionTracker", () => {
     });
   });
 
-  describe("ghost session reaping (issue #22)", () => {
-    /** Create a mock adapter that returns the given sessions from discover() and list() */
-    function mockAdapter(sessions: AgentSession[]): AgentAdapter {
-      const discovered: DiscoveredSession[] = sessions.map((s) => ({
-        id: s.id,
-        status: s.status === "running" ? "running" : "stopped",
-        adapter: s.adapter,
-        cwd: s.cwd,
-        model: s.model,
-        startedAt: s.startedAt,
-        stoppedAt: s.stoppedAt,
-        pid: s.pid,
-        prompt: s.prompt,
-        tokens: s.tokens,
-        cost: s.cost,
-      }));
-      return {
-        id: "mock",
-        discover: async () => discovered,
-        isAlive: async (id) =>
-          discovered.some((d) => d.id === id && d.status === "running"),
-        list: async () => sessions,
-        peek: async () => "",
-        status: async () => sessions[0],
-        launch: async () => sessions[0],
-        stop: async () => {},
-        resume: async () => {},
-        async *events() {},
-      };
-    }
-
-    it("marks dead PID sessions as stopped during poll", async () => {
-      // Pre-seed state with a "running" session whose PID is dead
-      tracker.track(
-        makeSession({ id: "pending-12345", status: "running", pid: 12345 }),
-        "claude-code",
-      );
-
-      // Create tracker with dead-PID checker and an adapter that returns nothing
-      const reapTracker = new SessionTracker(state, {
-        adapters: { "claude-code": mockAdapter([]) },
-        isProcessAlive: () => false,
-      });
-
-      // Trigger a poll cycle
-      reapTracker.startPolling();
-      // Wait for poll to complete
-      await new Promise((r) => setTimeout(r, 100));
-      reapTracker.stopPolling();
-
-      const session = state.getSession("pending-12345");
-      expect(session?.status).toBe("stopped");
-      expect(session?.stoppedAt).toBeDefined();
-    });
-
-    it("removes pending-* entry when resolved session exists with same PID", async () => {
-      // Pre-seed state with a pending entry
-      tracker.track(
-        makeSession({ id: "pending-99999", status: "running", pid: 99999 }),
-        "claude-code",
-      );
-
-      // Adapter returns a resolved session with the same PID
-      const resolvedSession = makeSession({
-        id: "abc123-real-session-id",
-        status: "running",
-        pid: 99999,
-      });
-
-      const reapTracker = new SessionTracker(state, {
-        adapters: { "claude-code": mockAdapter([resolvedSession]) },
-        isProcessAlive: (pid) => pid === 99999,
-      });
-
-      reapTracker.startPolling();
-      await new Promise((r) => setTimeout(r, 100));
-      reapTracker.stopPolling();
-
-      // pending-* entry should be removed
-      expect(state.getSession("pending-99999")).toBeUndefined();
-      // Real session should exist
-      expect(state.getSession("abc123-real-session-id")).toBeDefined();
-      expect(state.getSession("abc123-real-session-id")?.status).toBe(
-        "running",
-      );
-    });
-
-    it("live PID sessions still show as running after poll", async () => {
-      tracker.track(
-        makeSession({ id: "live-session", status: "running", pid: 55555 }),
-        "claude-code",
-      );
-
-      // Adapter returns this session as running
-      const liveSession = makeSession({
-        id: "live-session",
-        status: "running",
-        pid: 55555,
-      });
-
-      const reapTracker = new SessionTracker(state, {
-        adapters: { "claude-code": mockAdapter([liveSession]) },
-        isProcessAlive: (pid) => pid === 55555,
-      });
-
-      reapTracker.startPolling();
-      await new Promise((r) => setTimeout(r, 100));
-      reapTracker.stopPolling();
-
-      const session = state.getSession("live-session");
-      expect(session?.status).toBe("running");
-      expect(session?.pid).toBe(55555);
-    });
-
-    it("listSessions deduplicates pending-* vs resolved entries by PID", () => {
-      // Both entries exist in state
-      tracker.track(
-        makeSession({ id: "pending-77777", status: "running", pid: 77777 }),
-        "claude-code",
-      );
-      tracker.track(
-        makeSession({
-          id: "real-session-uuid",
-          status: "running",
-          pid: 77777,
-        }),
-        "claude-code",
-      );
-
-      const list = tracker.listSessions({ all: true });
-      // Only the resolved session should appear
-      const ids = list.map((s) => s.id);
-      expect(ids).toContain("real-session-uuid");
-      expect(ids).not.toContain("pending-77777");
-    });
-
-    it("keeps pending-* entry if no resolved session shares its PID", () => {
-      // Only a pending entry, no resolved session with same PID
-      tracker.track(
-        makeSession({ id: "pending-44444", status: "running", pid: 44444 }),
-        "claude-code",
-      );
-      tracker.track(
-        makeSession({
-          id: "different-session",
-          status: "running",
-          pid: 88888,
-        }),
-        "claude-code",
-      );
-
-      const list = tracker.listSessions({ all: true });
-      const ids = list.map((s) => s.id);
-      expect(ids).toContain("pending-44444");
-      expect(ids).toContain("different-session");
-    });
-  });
-
-  describe("ghost pending sessions (issue #27)", () => {
-    it("track() removes pending-PID entry when real UUID session registers with same PID", () => {
-      // Step 1: pending entry is created at launch time
-      tracker.track(
-        makeSession({ id: "pending-11111", status: "running", pid: 11111 }),
-        "claude-code",
-      );
-      expect(state.getSession("pending-11111")).toBeDefined();
-
-      // Step 2: real session registers with the same PID
-      tracker.track(
-        makeSession({
-          id: "real-uuid-session",
-          status: "running",
-          pid: 11111,
-        }),
-        "claude-code",
-      );
-
-      // pending entry should be consumed
-      expect(state.getSession("pending-11111")).toBeUndefined();
-      // real session should exist
-      expect(state.getSession("real-uuid-session")).toBeDefined();
-      expect(state.getSession("real-uuid-session")?.status).toBe("running");
-    });
-
-    it("listSessions marks running sessions with dead PIDs as stopped", () => {
-      // Create tracker with dead-PID checker
-      const deadPidTracker = new SessionTracker(state, {
-        adapters: {},
-        isProcessAlive: () => false,
-      });
-
-      // Track a running session with a PID that will be "dead"
-      deadPidTracker.track(
-        makeSession({ id: "ghost-session", status: "running", pid: 22222 }),
-        "claude-code",
-      );
-
-      // Listing should detect the dead PID and mark it stopped
-      const list = deadPidTracker.listSessions({ all: true });
-      const ghost = list.find((s) => s.id === "ghost-session");
-      expect(ghost?.status).toBe("stopped");
-      expect(ghost?.stoppedAt).toBeDefined();
-
-      // State should also be updated
-      const record = state.getSession("ghost-session");
-      expect(record?.status).toBe("stopped");
-    });
-
-    it("listSessions does not mark sessions with live PIDs as stopped", () => {
-      const livePidTracker = new SessionTracker(state, {
-        adapters: {},
-        isProcessAlive: () => true,
-      });
-
-      livePidTracker.track(
-        makeSession({ id: "live-session", status: "running", pid: 33333 }),
-        "claude-code",
-      );
-
-      const list = livePidTracker.listSessions();
-      const live = list.find((s) => s.id === "live-session");
-      expect(live?.status).toBe("running");
-    });
-
-    it("removeSession removes a session from state", () => {
+  describe("removeSession", () => {
+    it("removes a session from state", () => {
       tracker.track(
         makeSession({ id: "pending-55555", status: "running", pid: 55555 }),
         "claude-code",
@@ -414,6 +134,302 @@ describe("SessionTracker", () => {
 
       tracker.removeSession("pending-55555");
       expect(state.getSession("pending-55555")).toBeUndefined();
+    });
+  });
+
+  describe("reconcileAndEnrich", () => {
+    it("enriches discovered sessions with launch metadata", () => {
+      // Pre-seed launch metadata with extra info
+      tracker.track(
+        makeSession({
+          id: "s1",
+          status: "running",
+          prompt: "Fix the bug",
+          group: "g-abc",
+          spec: "/tmp/spec.md",
+        }),
+        "claude-code",
+      );
+
+      const discovered = [
+        makeDiscovered({
+          id: "s1",
+          status: "running",
+          adapter: "claude-code",
+          pid: 1234,
+        }),
+      ];
+
+      const { sessions } = tracker.reconcileAndEnrich(
+        discovered,
+        new Set(["claude-code"]),
+      );
+
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("s1");
+      expect(sessions[0].prompt).toBe("Fix the bug");
+      expect(sessions[0].group).toBe("g-abc");
+      expect(sessions[0].spec).toBe("/tmp/spec.md");
+      expect(sessions[0].pid).toBe(1234);
+    });
+
+    it("returns discovered sessions without launch metadata", () => {
+      // No launch metadata for this session
+      const discovered = [
+        makeDiscovered({
+          id: "unknown-session",
+          status: "running",
+          adapter: "claude-code",
+          model: "claude-4",
+        }),
+      ];
+
+      const { sessions } = tracker.reconcileAndEnrich(
+        discovered,
+        new Set(["claude-code"]),
+      );
+
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("unknown-session");
+      expect(sessions[0].model).toBe("claude-4");
+      expect(sessions[0].prompt).toBeUndefined();
+    });
+
+    it("marks disappeared sessions as stopped when adapter succeeded", () => {
+      // Session was launched 60+ seconds ago
+      tracker.track(
+        makeSession({
+          id: "old-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000), // 2 minutes ago
+        }),
+        "claude-code",
+      );
+
+      // Adapter returns empty — session is gone
+      const { sessions, stoppedLaunchIds } = tracker.reconcileAndEnrich(
+        [],
+        new Set(["claude-code"]),
+      );
+
+      expect(stoppedLaunchIds).toContain("old-session");
+      expect(state.getSession("old-session")?.status).toBe("stopped");
+      // Stopped session should NOT appear in results
+      expect(sessions.map((s) => s.id)).not.toContain("old-session");
+    });
+
+    it("preserves recently-launched sessions within grace period", () => {
+      // Session was launched just now
+      tracker.track(
+        makeSession({
+          id: "new-session",
+          status: "running",
+          startedAt: new Date(), // just now
+        }),
+        "claude-code",
+      );
+
+      // Adapter hasn't discovered it yet
+      const { sessions, stoppedLaunchIds } = tracker.reconcileAndEnrich(
+        [],
+        new Set(["claude-code"]),
+      );
+
+      expect(stoppedLaunchIds).not.toContain("new-session");
+      expect(sessions.map((s) => s.id)).toContain("new-session");
+      expect(state.getSession("new-session")?.status).toBe("running");
+    });
+
+    it("does not reconcile sessions whose adapter failed", () => {
+      tracker.track(
+        makeSession({
+          id: "oc-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+        }),
+        "openclaw",
+      );
+
+      // openclaw adapter failed (not in succeededAdapters)
+      const { sessions, stoppedLaunchIds } = tracker.reconcileAndEnrich(
+        [],
+        new Set(["claude-code"]), // only claude-code succeeded
+      );
+
+      expect(stoppedLaunchIds).not.toContain("oc-session");
+      // Session should still be included (from launch metadata)
+      expect(sessions.map((s) => s.id)).toContain("oc-session");
+      expect(state.getSession("oc-session")?.status).toBe("running");
+    });
+
+    it("handles pending→UUID resolution via PID match", () => {
+      // pending entry was launched 2 min ago
+      tracker.track(
+        makeSession({
+          id: "pending-99999",
+          status: "running",
+          pid: 99999,
+          startedAt: new Date(Date.now() - 120_000),
+        }),
+        "claude-code",
+      );
+
+      // Adapter returns a resolved session with the same PID but different ID
+      const discovered = [
+        makeDiscovered({
+          id: "real-uuid",
+          status: "running",
+          adapter: "claude-code",
+          pid: 99999,
+        }),
+      ];
+
+      const { sessions, stoppedLaunchIds } = tracker.reconcileAndEnrich(
+        discovered,
+        new Set(["claude-code"]),
+      );
+
+      // pending entry should be cleaned up
+      expect(stoppedLaunchIds).toContain("pending-99999");
+      expect(state.getSession("pending-99999")).toBeUndefined();
+      // Real session should be in results
+      expect(sessions.map((s) => s.id)).toContain("real-uuid");
+    });
+
+    it("merges results from multiple adapters", () => {
+      const discovered = [
+        makeDiscovered({
+          id: "cc-1",
+          status: "running",
+          adapter: "claude-code",
+        }),
+        makeDiscovered({
+          id: "oc-1",
+          status: "running",
+          adapter: "openclaw",
+        }),
+        makeDiscovered({
+          id: "pi-1",
+          status: "stopped",
+          adapter: "pi",
+        }),
+      ];
+
+      const { sessions } = tracker.reconcileAndEnrich(
+        discovered,
+        new Set(["claude-code", "openclaw", "pi"]),
+      );
+
+      expect(sessions).toHaveLength(3);
+      const ids = sessions.map((s) => s.id);
+      expect(ids).toContain("cc-1");
+      expect(ids).toContain("oc-1");
+      expect(ids).toContain("pi-1");
+    });
+
+    it("does not mark stopped sessions as stopped again", () => {
+      // Already stopped in launch metadata
+      tracker.track(
+        makeSession({
+          id: "already-stopped",
+          status: "stopped",
+          startedAt: new Date(Date.now() - 120_000),
+        }),
+        "claude-code",
+      );
+
+      const { stoppedLaunchIds } = tracker.reconcileAndEnrich(
+        [],
+        new Set(["claude-code"]),
+      );
+
+      // Should not try to stop it again
+      expect(stoppedLaunchIds).not.toContain("already-stopped");
+    });
+  });
+
+  describe("cleanupDeadLaunches", () => {
+    it("marks sessions with dead PIDs as stopped", () => {
+      const deadTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => false,
+      });
+
+      deadTracker.track(
+        makeSession({ id: "s1", status: "running", pid: 12345 }),
+        "claude-code",
+      );
+
+      const dead = deadTracker.cleanupDeadLaunches();
+
+      expect(dead).toContain("s1");
+      expect(state.getSession("s1")?.status).toBe("stopped");
+      expect(state.getSession("s1")?.stoppedAt).toBeDefined();
+    });
+
+    it("does not mark sessions with live PIDs as stopped", () => {
+      const liveTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+      });
+
+      liveTracker.track(
+        makeSession({ id: "s1", status: "running", pid: 12345 }),
+        "claude-code",
+      );
+
+      const dead = liveTracker.cleanupDeadLaunches();
+
+      expect(dead).toHaveLength(0);
+      expect(state.getSession("s1")?.status).toBe("running");
+    });
+
+    it("skips already-stopped sessions", () => {
+      tracker.track(
+        makeSession({ id: "s1", status: "stopped", pid: 12345 }),
+        "claude-code",
+      );
+
+      const dead = tracker.cleanupDeadLaunches();
+      expect(dead).toHaveLength(0);
+    });
+
+    it("handles sessions without PIDs (no change)", () => {
+      tracker.track(
+        makeSession({ id: "s1", status: "running" }),
+        "claude-code",
+      );
+
+      const dead = tracker.cleanupDeadLaunches();
+      expect(dead).toHaveLength(0);
+      expect(state.getSession("s1")?.status).toBe("running");
+    });
+  });
+
+  describe("startLaunchCleanup / stopLaunchCleanup", () => {
+    it("periodically checks PID liveness", async () => {
+      vi.useFakeTimers();
+
+      const onDead = vi.fn();
+      const deadTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => false,
+      });
+
+      deadTracker.track(
+        makeSession({ id: "s1", status: "running", pid: 12345 }),
+        "claude-code",
+      );
+
+      deadTracker.startLaunchCleanup(onDead);
+
+      // Advance past the 30s interval
+      vi.advanceTimersByTime(30_000);
+
+      expect(onDead).toHaveBeenCalledWith("s1");
+
+      deadTracker.stopLaunchCleanup();
+      vi.useRealTimers();
     });
   });
 });
