@@ -429,6 +429,7 @@ describe("SessionTracker", () => {
       expect(onDead).toHaveBeenCalledWith("s1");
 
       deadTracker.stopLaunchCleanup();
+      state.flush();
       vi.useRealTimers();
     });
   });
