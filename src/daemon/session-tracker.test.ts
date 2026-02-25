@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSession, DiscoveredSession } from "../core/types.js";
+import type {
+  AgentAdapter,
+  AgentSession,
+  DiscoveredSession,
+} from "../core/types.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
@@ -18,6 +22,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   tracker.stopLaunchCleanup();
+  tracker.stopPendingResolution();
   state.flush();
   await fs.rm(tmpDir, {
     recursive: true,
@@ -26,6 +31,34 @@ afterEach(async () => {
     retryDelay: 100,
   });
 });
+
+/** Create a mock adapter that returns fixed discovered sessions */
+function mockAdapter(sessions: DiscoveredSession[]): AgentAdapter {
+  return {
+    id: "mock",
+    discover: async () => sessions,
+    isAlive: async () => false,
+    list: async () => [],
+    peek: async () => "",
+    status: async () => ({
+      id: "",
+      adapter: "",
+      status: "stopped",
+      startedAt: new Date(),
+      meta: {},
+    }),
+    launch: async () => ({
+      id: "",
+      adapter: "",
+      status: "running",
+      startedAt: new Date(),
+      meta: {},
+    }),
+    stop: async () => {},
+    resume: async () => {},
+    events: async function* () {},
+  } as AgentAdapter;
+}
 
 function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
   return {
@@ -434,6 +467,229 @@ describe("SessionTracker", () => {
       expect(onDead).toHaveBeenCalledWith("s1");
 
       deadTracker.stopLaunchCleanup();
+      state.flush();
+      vi.useRealTimers();
+    });
+  });
+
+  describe("resolvePendingId", () => {
+    it("resolves pending-PID to real UUID via adapter discover", async () => {
+      const adapter = mockAdapter([
+        makeDiscovered({ id: "real-uuid-abc", status: "running", pid: 42000 }),
+      ]);
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": adapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-42000", status: "running", pid: 42000 }),
+        "claude-code",
+      );
+
+      const resolved = await resolveTracker.resolvePendingId("pending-42000");
+
+      expect(resolved).toBe("real-uuid-abc");
+      expect(state.getSession("pending-42000")).toBeUndefined();
+      expect(state.getSession("real-uuid-abc")).toBeDefined();
+      expect(state.getSession("real-uuid-abc")?.pid).toBe(42000);
+    });
+
+    it("returns original ID for non-pending IDs", async () => {
+      const resolved = await tracker.resolvePendingId("normal-uuid");
+      expect(resolved).toBe("normal-uuid");
+    });
+
+    it("returns original ID when no matching PID found", async () => {
+      const adapter = mockAdapter([
+        makeDiscovered({ id: "other-uuid", status: "running", pid: 99999 }),
+      ]);
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": adapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-42000", status: "running", pid: 42000 }),
+        "claude-code",
+      );
+
+      const resolved = await resolveTracker.resolvePendingId("pending-42000");
+      expect(resolved).toBe("pending-42000");
+      expect(state.getSession("pending-42000")).toBeDefined();
+    });
+
+    it("returns original ID when adapter discovery fails", async () => {
+      const failAdapter = mockAdapter([]);
+      failAdapter.discover = async () => {
+        throw new Error("adapter offline");
+      };
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": failAdapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-42000", status: "running", pid: 42000 }),
+        "claude-code",
+      );
+
+      const resolved = await resolveTracker.resolvePendingId("pending-42000");
+      expect(resolved).toBe("pending-42000");
+    });
+
+    it("preserves launch metadata (prompt, group, spec) after resolution", async () => {
+      const adapter = mockAdapter([
+        makeDiscovered({ id: "real-uuid", status: "running", pid: 42000 }),
+      ]);
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": adapter },
+      });
+
+      resolveTracker.track(
+        makeSession({
+          id: "pending-42000",
+          status: "running",
+          pid: 42000,
+          prompt: "Fix the bug",
+          group: "g-test",
+          spec: "/tmp/spec.md",
+        }),
+        "claude-code",
+      );
+
+      await resolveTracker.resolvePendingId("pending-42000");
+
+      const record = state.getSession("real-uuid");
+      expect(record?.prompt).toBe("Fix the bug");
+      expect(record?.group).toBe("g-test");
+      expect(record?.spec).toBe("/tmp/spec.md");
+      expect(record?.id).toBe("real-uuid");
+    });
+
+    it("returns original ID when session has no PID", async () => {
+      tracker.track(
+        makeSession({ id: "pending-nopid", status: "running" }),
+        "claude-code",
+      );
+
+      const resolved = await tracker.resolvePendingId("pending-nopid");
+      expect(resolved).toBe("pending-nopid");
+    });
+  });
+
+  describe("resolvePendingSessions", () => {
+    it("batch-resolves multiple pending sessions", async () => {
+      const adapter = mockAdapter([
+        makeDiscovered({ id: "uuid-1", status: "running", pid: 1001 }),
+        makeDiscovered({ id: "uuid-2", status: "running", pid: 1002 }),
+      ]);
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": adapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-1001", status: "running", pid: 1001 }),
+        "claude-code",
+      );
+      resolveTracker.track(
+        makeSession({ id: "pending-1002", status: "running", pid: 1002 }),
+        "claude-code",
+      );
+
+      const resolved = await resolveTracker.resolvePendingSessions();
+
+      expect(resolved.size).toBe(2);
+      expect(resolved.get("pending-1001")).toBe("uuid-1");
+      expect(resolved.get("pending-1002")).toBe("uuid-2");
+      expect(state.getSession("pending-1001")).toBeUndefined();
+      expect(state.getSession("pending-1002")).toBeUndefined();
+      expect(state.getSession("uuid-1")).toBeDefined();
+      expect(state.getSession("uuid-2")).toBeDefined();
+    });
+
+    it("skips stopped pending sessions", async () => {
+      const adapter = mockAdapter([
+        makeDiscovered({ id: "uuid-1", status: "running", pid: 1001 }),
+      ]);
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": adapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-1001", status: "stopped", pid: 1001 }),
+        "claude-code",
+      );
+
+      const resolved = await resolveTracker.resolvePendingSessions();
+      expect(resolved.size).toBe(0);
+    });
+
+    it("returns empty map when no pending sessions exist", async () => {
+      const resolved = await tracker.resolvePendingSessions();
+      expect(resolved.size).toBe(0);
+    });
+
+    it("groups discover calls by adapter", async () => {
+      const ccDiscover = vi
+        .fn()
+        .mockResolvedValue([
+          makeDiscovered({ id: "cc-uuid", status: "running", pid: 2001 }),
+        ]);
+      const piDiscover = vi
+        .fn()
+        .mockResolvedValue([
+          makeDiscovered({ id: "pi-uuid", status: "running", pid: 2002 }),
+        ]);
+
+      const ccAdapter = mockAdapter([]);
+      ccAdapter.discover = ccDiscover;
+      const piAdapter = mockAdapter([]);
+      piAdapter.discover = piDiscover;
+
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": ccAdapter, pi: piAdapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-2001", status: "running", pid: 2001 }),
+        "claude-code",
+      );
+      resolveTracker.track(
+        makeSession({ id: "pending-2002", status: "running", pid: 2002 }),
+        "pi",
+      );
+
+      const resolved = await resolveTracker.resolvePendingSessions();
+
+      expect(resolved.size).toBe(2);
+      expect(ccDiscover).toHaveBeenCalledTimes(1);
+      expect(piDiscover).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("startPendingResolution / stopPendingResolution", () => {
+    it("periodically resolves pending sessions", async () => {
+      vi.useFakeTimers();
+
+      const adapter = mockAdapter([
+        makeDiscovered({ id: "uuid-bg", status: "running", pid: 7777 }),
+      ]);
+      const resolveTracker = new SessionTracker(state, {
+        adapters: { "claude-code": adapter },
+      });
+
+      resolveTracker.track(
+        makeSession({ id: "pending-7777", status: "running", pid: 7777 }),
+        "claude-code",
+      );
+
+      const onResolved = vi.fn();
+      resolveTracker.startPendingResolution(onResolved);
+
+      // Advance past the 10s interval
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(onResolved).toHaveBeenCalledWith("pending-7777", "uuid-bg");
+
+      resolveTracker.stopPendingResolution();
       state.flush();
       vi.useRealTimers();
     });

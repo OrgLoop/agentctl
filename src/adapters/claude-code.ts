@@ -328,7 +328,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // Claude Code's stream-json format emits a line with sessionId early on.
     let resolvedSessionId: string | undefined;
     if (pid) {
-      resolvedSessionId = await this.pollForSessionId(logPath, pid, 5000);
+      resolvedSessionId = await this.pollForSessionId(logPath, pid, 15000);
     }
 
     const sessionId =
