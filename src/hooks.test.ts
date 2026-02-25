@@ -94,14 +94,14 @@ describe("runHook", () => {
     expect(result?.stdout.trim()).toBe("claude-opus-4-6");
   });
 
-  it("handles hook script failures gracefully", async () => {
+  it("throws when hook script fails", async () => {
     const hooks: LifecycleHooks = { onCreate: "exit 1" };
-    const result = await runHook(hooks, "onCreate", {
-      ...defaultCtx,
-      cwd: tmpDir,
-    });
-    // Should not throw, returns result with stderr
-    expect(result).not.toBeNull();
+    await expect(
+      runHook(hooks, "onCreate", {
+        ...defaultCtx,
+        cwd: tmpDir,
+      }),
+    ).rejects.toThrow("Hook onCreate failed:");
   });
 
   it("runs onComplete hook", async () => {
