@@ -55,7 +55,7 @@ export class LockManager {
     const existing = this.check(resolved);
     if (existing?.type === "manual") {
       throw new Error(
-        `Already manually locked by ${existing.lockedBy}: ${existing.reason}`,
+        `Already manually locked by ${existing.lockedBy ?? "unknown"}${existing.reason ? `: ${existing.reason}` : ""}`,
       );
     }
     const lock: Lock = {

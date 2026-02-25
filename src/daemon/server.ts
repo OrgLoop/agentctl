@@ -525,7 +525,7 @@ function createRequestHandler(ctx: HandlerContext) {
         if (lock && !params.force) {
           if (lock.type === "manual") {
             throw new Error(
-              `Directory locked by ${lock.lockedBy}: ${lock.reason}. Use --force to override.`,
+              `Directory locked by ${lock.lockedBy ?? "unknown"}${lock.reason ? `: ${lock.reason}` : ""}. Use --force to override.`,
             );
           }
           throw new Error(
