@@ -501,7 +501,7 @@ program
   .description("Launch a new agent session (or multiple with --adapter flags)")
   .requiredOption("-p, --prompt <text>", "Prompt to send")
   .option("--spec <path>", "Spec file path")
-  .option("--cwd <dir>", "Working directory")
+  .option("--cwd <dir>", "Working directory (default: current directory)")
   .option("--model <model>", "Model to use (e.g. sonnet, opus)")
   .option("--force", "Override directory locks")
   .option(
