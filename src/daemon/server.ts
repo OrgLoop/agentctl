@@ -133,6 +133,11 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     lockManager.autoUnlock(deadId);
   });
 
+  // 11b. Start periodic background resolution of pending-* session IDs (10s interval)
+  sessionTracker.startPendingResolution((oldId, newId) => {
+    lockManager.updateAutoLockSessionId(oldId, newId);
+  });
+
   // 12. Create request handler
   const handleRequest = createRequestHandler({
     sessionTracker,
@@ -209,6 +214,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   // Shutdown function
   const shutdown = async () => {
     sessionTracker.stopLaunchCleanup();
+    sessionTracker.stopPendingResolution();
     fuseEngine.shutdown();
     state.flush();
     await state.persist();
@@ -420,7 +426,19 @@ function createRequestHandler(ctx: HandlerContext) {
       }
 
       case "session.status": {
-        const id = params.id as string;
+        let id = params.id as string;
+
+        // On-demand resolution: if pending-*, try to resolve first
+        const trackedForResolve = ctx.sessionTracker.getSession(id);
+        const resolveTarget = trackedForResolve?.id || id;
+        if (resolveTarget.startsWith("pending-")) {
+          const resolvedId =
+            await ctx.sessionTracker.resolvePendingId(resolveTarget);
+          if (resolvedId !== resolveTarget) {
+            ctx.lockManager.updateAutoLockSessionId(resolveTarget, resolvedId);
+            id = resolvedId;
+          }
+        }
 
         // Check launch metadata to determine adapter
         const launchRecord = ctx.sessionTracker.getSession(id);
@@ -477,13 +495,23 @@ function createRequestHandler(ctx: HandlerContext) {
 
       case "session.peek": {
         // Auto-detect adapter from tracked session, fall back to param or claude-code
-        const tracked = ctx.sessionTracker.getSession(params.id as string);
+        let tracked = ctx.sessionTracker.getSession(params.id as string);
+        let peekId = tracked?.id || (params.id as string);
+
+        // On-demand resolution: if pending-*, try to resolve before peeking
+        if (peekId.startsWith("pending-")) {
+          const resolvedId = await ctx.sessionTracker.resolvePendingId(peekId);
+          if (resolvedId !== peekId) {
+            ctx.lockManager.updateAutoLockSessionId(peekId, resolvedId);
+            peekId = resolvedId;
+            tracked = ctx.sessionTracker.getSession(resolvedId);
+          }
+        }
+
         const adapterName =
           (params.adapter as string) || tracked?.adapter || "claude-code";
         const adapter = ctx.adapters[adapterName];
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
-        // Use the full session ID if we resolved it from the tracker
-        const peekId = tracked?.id || (params.id as string);
         return adapter.peek(peekId, {
           lines: params.lines as number | undefined,
         });
@@ -544,17 +572,29 @@ function createRequestHandler(ctx: HandlerContext) {
 
       case "session.stop": {
         const id = params.id as string;
-        const launchRecord = ctx.sessionTracker.getSession(id);
+        let launchRecord = ctx.sessionTracker.getSession(id);
+        let sessionId = launchRecord?.id || id;
+
+        // On-demand resolution: if pending-*, try to resolve before stopping
+        if (sessionId.startsWith("pending-")) {
+          const resolvedId =
+            await ctx.sessionTracker.resolvePendingId(sessionId);
+          if (resolvedId !== sessionId) {
+            ctx.lockManager.updateAutoLockSessionId(sessionId, resolvedId);
+            sessionId = resolvedId;
+            launchRecord = ctx.sessionTracker.getSession(resolvedId);
+          }
+        }
 
         // Ghost pending entry with dead PID: remove from state with --force
         if (
-          launchRecord?.id.startsWith("pending-") &&
+          sessionId.startsWith("pending-") &&
           params.force &&
-          launchRecord.pid &&
+          launchRecord?.pid &&
           !isProcessAlive(launchRecord.pid)
         ) {
-          ctx.lockManager.autoUnlock(launchRecord.id);
-          ctx.sessionTracker.removeSession(launchRecord.id);
+          ctx.lockManager.autoUnlock(sessionId);
+          ctx.sessionTracker.removeSession(sessionId);
           return null;
         }
 
@@ -567,7 +607,6 @@ function createRequestHandler(ctx: HandlerContext) {
         const adapter = ctx.adapters[adapterName];
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
 
-        const sessionId = launchRecord?.id || id;
         await adapter.stop(sessionId, {
           force: params.force as boolean | undefined,
         });
@@ -586,7 +625,20 @@ function createRequestHandler(ctx: HandlerContext) {
 
       case "session.resume": {
         const id = params.id as string;
-        const launchRecord = ctx.sessionTracker.getSession(id);
+        let launchRecord = ctx.sessionTracker.getSession(id);
+        let resumeId = launchRecord?.id || id;
+
+        // On-demand resolution: if pending-*, try to resolve before resuming
+        if (resumeId.startsWith("pending-")) {
+          const resolvedId =
+            await ctx.sessionTracker.resolvePendingId(resumeId);
+          if (resolvedId !== resumeId) {
+            ctx.lockManager.updateAutoLockSessionId(resumeId, resolvedId);
+            resumeId = resolvedId;
+            launchRecord = ctx.sessionTracker.getSession(resolvedId);
+          }
+        }
+
         const adapterName = (params.adapter as string) || launchRecord?.adapter;
         if (!adapterName)
           throw new Error(
@@ -594,7 +646,7 @@ function createRequestHandler(ctx: HandlerContext) {
           );
         const adapter = ctx.adapters[adapterName];
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
-        await adapter.resume(launchRecord?.id || id, params.message as string);
+        await adapter.resume(resumeId, params.message as string);
         return null;
       }
 
