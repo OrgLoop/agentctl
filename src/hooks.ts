@@ -47,12 +47,11 @@ export async function runHook(
     const result = await execAsync(script, {
       cwd: ctx.cwd,
       env,
-      timeout: 60_000,
+      timeout: 300_000,
     });
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (err) {
     const e = err as Error & { stdout?: string; stderr?: string };
-    console.error(`Hook ${phase} failed:`, e.message);
-    return { stdout: e.stdout || "", stderr: e.stderr || "" };
+    throw new Error(`Hook ${phase} failed: ${e.message}`);
   }
 }
