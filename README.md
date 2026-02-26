@@ -42,8 +42,9 @@ agentctl list
 # List all sessions (including stopped, last 7 days)
 agentctl list -a
 
-# Peek at recent output from a session
+# Peek at recent output from a session (alias: logs)
 agentctl peek <session-id>
+agentctl logs <session-id>
 
 # Launch a new Claude Code session
 agentctl launch -p "Read the spec and implement phase 2"
@@ -61,7 +62,7 @@ agentctl stop <session-id>
 agentctl resume <session-id> "fix the failing tests"
 ```
 
-Session IDs support prefix matching — `agentctl peek abc123` matches any session starting with `abc123`.
+Session IDs support prefix matching — `agentctl peek abc123` (or `agentctl logs abc123`) matches any session starting with `abc123`.
 
 ### Parallel Multi-Adapter Launch
 
@@ -144,7 +145,7 @@ agentctl status <id> [options]
   --adapter <name>     Adapter to use
   --json               Output as JSON
 
-agentctl peek <id> [options]
+agentctl peek|logs <id> [options]
   -n, --lines <n>      Number of recent messages (default: 20)
   --adapter <name>     Adapter to use
 

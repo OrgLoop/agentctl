@@ -381,57 +381,71 @@ program
     process.exit(1);
   });
 
+// Shared handler for peek/logs
+async function peekAction(
+  id: string,
+  opts: { lines: string; adapter?: string },
+): Promise<void> {
+  const daemonRunning = await ensureDaemon();
+
+  if (daemonRunning) {
+    try {
+      const output = await client.call<string>("session.peek", {
+        id,
+        lines: Number.parseInt(opts.lines, 10),
+      });
+      console.log(output);
+      return;
+    } catch {
+      // Daemon failed — fall through to direct adapter lookup
+    }
+  }
+
+  // Direct fallback: try specified adapter, or search all adapters
+  if (opts.adapter) {
+    const adapter = getAdapter(opts.adapter);
+    try {
+      const output = await adapter.peek(id, {
+        lines: Number.parseInt(opts.lines, 10),
+      });
+      console.log(output);
+      return;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  }
+
+  for (const adapter of getAllAdapters()) {
+    try {
+      const output = await adapter.peek(id, {
+        lines: Number.parseInt(opts.lines, 10),
+      });
+      console.log(output);
+      return;
+    } catch {
+      // Try next adapter
+    }
+  }
+  console.error(`Session not found: ${id}`);
+  process.exit(1);
+}
+
 // peek
 program
   .command("peek <id>")
-  .description("Peek at recent output from a session")
+  .description("Peek at recent output from a session (alias: logs)")
   .option("-n, --lines <n>", "Number of recent messages", "20")
   .option("--adapter <name>", "Adapter to use")
-  .action(async (id: string, opts) => {
-    const daemonRunning = await ensureDaemon();
+  .action(peekAction);
 
-    if (daemonRunning) {
-      try {
-        const output = await client.call<string>("session.peek", {
-          id,
-          lines: Number.parseInt(opts.lines, 10),
-        });
-        console.log(output);
-        return;
-      } catch {
-        // Daemon failed — fall through to direct adapter lookup
-      }
-    }
-
-    // Direct fallback: try specified adapter, or search all adapters
-    if (opts.adapter) {
-      const adapter = getAdapter(opts.adapter);
-      try {
-        const output = await adapter.peek(id, {
-          lines: Number.parseInt(opts.lines, 10),
-        });
-        console.log(output);
-        return;
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exit(1);
-      }
-    }
-
-    for (const adapter of getAllAdapters()) {
-      try {
-        const output = await adapter.peek(id, {
-          lines: Number.parseInt(opts.lines, 10),
-        });
-        console.log(output);
-        return;
-      } catch {
-        // Try next adapter
-      }
-    }
-    console.error(`Session not found: ${id}`);
-    process.exit(1);
-  });
+// logs — alias for peek with higher default line count
+program
+  .command("logs <id>")
+  .description("Show recent session output (alias for peek, default 50 lines)")
+  .option("-n, --lines <n>", "Number of recent messages", "50")
+  .option("--adapter <name>", "Adapter to use")
+  .action(peekAction);
 
 // stop
 program
