@@ -81,6 +81,17 @@ export class LockManager {
     );
   }
 
+  /** Update the sessionId on auto-locks when a pending ID is resolved to a real UUID. */
+  updateAutoLockSessionId(oldId: string, newId: string): void {
+    const locks = this.state.getLocks();
+    for (const lock of locks) {
+      if (lock.type === "auto" && lock.sessionId === oldId) {
+        lock.sessionId = newId;
+      }
+    }
+    this.state.markDirty();
+  }
+
   listAll(): Lock[] {
     return this.state.getLocks();
   }

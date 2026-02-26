@@ -34,6 +34,7 @@ export class SessionTracker {
   private adapters: Record<string, AgentAdapter>;
   private readonly isProcessAlive: (pid: number) => boolean;
   private cleanupHandle: ReturnType<typeof setInterval> | null = null;
+  private pendingResolutionHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
@@ -61,6 +62,118 @@ export class SessionTracker {
       clearInterval(this.cleanupHandle);
       this.cleanupHandle = null;
     }
+  }
+
+  /**
+   * Start periodic background resolution of pending-* session IDs.
+   * Runs every 10s, discovers real UUIDs via adapter PID matching.
+   */
+  startPendingResolution(
+    onResolved?: (oldId: string, newId: string) => void,
+  ): void {
+    if (this.pendingResolutionHandle) return;
+    this.pendingResolutionHandle = setInterval(async () => {
+      const resolved = await this.resolvePendingSessions();
+      if (onResolved) {
+        for (const [oldId, newId] of resolved) {
+          onResolved(oldId, newId);
+        }
+      }
+    }, 10_000);
+  }
+
+  stopPendingResolution(): void {
+    if (this.pendingResolutionHandle) {
+      clearInterval(this.pendingResolutionHandle);
+      this.pendingResolutionHandle = null;
+    }
+  }
+
+  /**
+   * Resolve a single pending-* session ID on demand.
+   * Returns the resolved real UUID, or the original ID if resolution fails.
+   */
+  async resolvePendingId(id: string): Promise<string> {
+    if (!id.startsWith("pending-")) return id;
+
+    const record = this.getSession(id);
+    if (!record || !record.pid) return id;
+
+    const adapter = this.adapters[record.adapter];
+    if (!adapter) return id;
+
+    try {
+      const discovered = await adapter.discover();
+      const match = discovered.find((d) => d.pid === record.pid);
+      if (match && match.id !== id) {
+        // Resolve: move state from pending ID to real UUID
+        const updatedRecord: SessionRecord = { ...record, id: match.id };
+        this.state.removeSession(id);
+        this.state.setSession(match.id, updatedRecord);
+        return match.id;
+      }
+    } catch {
+      // Adapter failed — return original ID
+    }
+
+    return id;
+  }
+
+  /**
+   * Batch-resolve all pending-* session IDs via adapter discovery.
+   * Groups pending sessions by adapter to minimize discover() calls.
+   * Returns a map of oldId → newId for each resolved session.
+   */
+  async resolvePendingSessions(): Promise<Map<string, string>> {
+    const resolved = new Map<string, string>();
+    const sessions = this.state.getSessions();
+
+    // Group pending sessions by adapter
+    const pendingByAdapter = new Map<
+      string,
+      Array<{ id: string; record: SessionRecord }>
+    >();
+    for (const [id, record] of Object.entries(sessions)) {
+      if (!id.startsWith("pending-")) continue;
+      if (record.status === "stopped" || record.status === "completed")
+        continue;
+      if (!record.pid) continue;
+
+      const list = pendingByAdapter.get(record.adapter) || [];
+      list.push({ id, record });
+      pendingByAdapter.set(record.adapter, list);
+    }
+
+    if (pendingByAdapter.size === 0) return resolved;
+
+    // For each adapter with pending sessions, run discover() once
+    for (const [adapterName, pendings] of pendingByAdapter) {
+      const adapter = this.adapters[adapterName];
+      if (!adapter) continue;
+
+      try {
+        const discovered = await adapter.discover();
+        const pidToId = new Map<number, string>();
+        for (const d of discovered) {
+          if (d.pid) pidToId.set(d.pid, d.id);
+        }
+
+        for (const { id, record } of pendings) {
+          if (!record.pid) continue;
+          const resolvedId = pidToId.get(record.pid);
+          if (resolvedId && resolvedId !== id) {
+            const updatedRecord: SessionRecord = { ...record, id: resolvedId };
+            this.state.removeSession(id);
+            this.state.setSession(resolvedId, updatedRecord);
+            resolved.set(id, resolvedId);
+          }
+        }
+      } catch {
+        // Adapter failed — skip
+      }
+    }
+
+    return resolved;
   }
 
   /** Track a newly launched session (stores launch metadata in state) */
