@@ -48,6 +48,9 @@ agentctl peek <session-id>
 # Launch a new Claude Code session
 agentctl launch -p "Read the spec and implement phase 2"
 
+# Launch in a specific directory
+agentctl launch -p "Fix the auth bug" --cwd ~/code/mono
+
 # Launch a new Pi session
 agentctl launch pi -p "Refactor the auth module"
 
@@ -148,12 +151,14 @@ agentctl peek <id> [options]
 agentctl launch [adapter] [options]
   -p, --prompt <text>  Prompt to send (required)
   --spec <path>        Spec file path
-  --cwd <dir>          Working directory
+  --cwd <dir>          Working directory (default: current directory)
   --model <model>      Model to use (e.g. sonnet, opus)
   --adapter <name>     Adapter to launch (repeatable for parallel launch)
   --matrix <file>      YAML matrix file for advanced sweep launch
   --group <id>         Filter by launch group (for list command)
   --force              Override directory locks
+
+When `--cwd` is omitted, the agent launches in the current working directory (`$PWD`). This means you should either `cd` into the target project first or pass `--cwd` explicitly. Launching from an unrelated directory (e.g. `~`) will start the agent in the wrong place.
 
 agentctl stop <id> [options]
   --force              Force kill (SIGINT then SIGKILL)
