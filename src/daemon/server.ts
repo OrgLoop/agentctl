@@ -351,8 +351,12 @@ function createRequestHandler(ctx: HandlerContext) {
             )
           : Object.entries(ctx.adapters);
 
-        const ADAPTER_TIMEOUT_MS = 5000;
+        const ADAPTER_TIMEOUT_MS = Number.parseInt(
+          process.env.AGENTCTL_ADAPTER_TIMEOUT ?? "5000",
+          10,
+        );
         const succeededAdapters = new Set<string>();
+        const timedOutAdapters: string[] = [];
 
         const results = await Promise.allSettled(
           adapterEntries.map(([name, adapter]) =>
@@ -362,14 +366,24 @@ function createRequestHandler(ctx: HandlerContext) {
                 return sessions.map((s) => ({ ...s, adapter: name }));
               }),
               new Promise<never>((_, reject) =>
-                setTimeout(
-                  () => reject(new Error(`Adapter ${name} timed out`)),
-                  ADAPTER_TIMEOUT_MS,
-                ),
+                setTimeout(() => {
+                  timedOutAdapters.push(name);
+                  reject(new Error(`Adapter ${name} timed out`));
+                }, ADAPTER_TIMEOUT_MS),
               ),
             ]),
           ),
         );
+
+        // Collect names of adapters that errored (not timeout)
+        const failedAdapters: string[] = [];
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          const name = adapterEntries[i][0];
+          if (r.status === "rejected" && !timedOutAdapters.includes(name)) {
+            failedAdapters.push(name);
+          }
+        }
 
         // Merge fulfilled results, skip failed adapters
         const discovered: import("../core/types.js").DiscoveredSession[] =
@@ -422,7 +436,18 @@ function createRequestHandler(ctx: HandlerContext) {
           ).length,
         );
 
-        return sessions;
+        // Build warnings for omitted adapters
+        const warnings: string[] = [];
+        if (timedOutAdapters.length > 0) {
+          warnings.push(
+            `Adapter(s) timed out after ${ADAPTER_TIMEOUT_MS}ms: ${timedOutAdapters.join(", ")}`,
+          );
+        }
+        if (failedAdapters.length > 0) {
+          warnings.push(`Adapter(s) failed: ${failedAdapters.join(", ")}`);
+        }
+
+        return { sessions, warnings };
       }
 
       case "session.status": {

@@ -709,6 +709,84 @@ describe("OpenClawAdapter", () => {
       );
     });
   });
+
+  describe("discover()", () => {
+    it("returns recent sessions as running", async () => {
+      const adapter = new OpenClawAdapter({
+        authToken: "test-token",
+        rpcCall: makeMockRpc({
+          "sessions.list": () =>
+            makeListResult([
+              {
+                key: "agent:jarvis:active",
+                kind: "direct",
+                updatedAt: fiveMinAgo,
+                sessionId: "active-session-id",
+              },
+            ]),
+        }),
+        deviceIdentity: null,
+      });
+
+      const sessions = await adapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("active-session-id");
+      expect(sessions[0].status).toBe("running");
+    });
+
+    it("returns old sessions as stopped, not running (#72)", async () => {
+      const adapter = new OpenClawAdapter({
+        authToken: "test-token",
+        rpcCall: makeMockRpc({
+          "sessions.list": () =>
+            makeListResult([
+              {
+                key: "agent:jarvis:old-session",
+                kind: "direct",
+                updatedAt: hourAgo,
+                sessionId: "old-session-id",
+              },
+            ]),
+        }),
+        deviceIdentity: null,
+      });
+
+      const sessions = await adapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("stopped");
+    });
+
+    it("correctly classifies mixed recent and old sessions", async () => {
+      const adapter = new OpenClawAdapter({
+        authToken: "test-token",
+        rpcCall: makeMockRpc({
+          "sessions.list": () =>
+            makeListResult([
+              {
+                key: "agent:jarvis:active",
+                kind: "direct",
+                updatedAt: fiveMinAgo,
+                sessionId: "active-id",
+              },
+              {
+                key: "agent:jarvis:old",
+                kind: "direct",
+                updatedAt: hourAgo,
+                sessionId: "old-id",
+              },
+            ]),
+        }),
+        deviceIdentity: null,
+      });
+
+      const sessions = await adapter.discover();
+      expect(sessions).toHaveLength(2);
+      const active = sessions.find((s) => s.id === "active-id");
+      const old = sessions.find((s) => s.id === "old-id");
+      expect(active?.status).toBe("running");
+      expect(old?.status).toBe("stopped");
+    });
+  });
 });
 
 // --- Test helpers ---
