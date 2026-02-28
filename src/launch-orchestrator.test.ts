@@ -5,6 +5,7 @@ import {
   generateGroupId,
   parseAdapterSlots,
   slotSuffix,
+  uniqueSlotSuffixes,
 } from "./launch-orchestrator.js";
 
 describe("generateGroupId", () => {
@@ -61,6 +62,55 @@ describe("slotSuffix", () => {
     ];
     expect(slotSuffix(slots[0], slots)).toBe("codex-gpt5-codex");
     expect(slotSuffix(slots[1], slots)).toBe("codex-gpt4-o");
+  });
+});
+
+describe("uniqueSlotSuffixes", () => {
+  it("returns unmodified suffixes when no collisions", () => {
+    const slots: AdapterSlot[] = [
+      { adapter: "claude-code", model: "claude-opus-4-6" },
+      { adapter: "claude-code", model: "claude-sonnet-4-5" },
+      { adapter: "codex" },
+    ];
+    expect(uniqueSlotSuffixes(slots)).toEqual([
+      "cc-opus",
+      "cc-sonnet",
+      "codex",
+    ]);
+  });
+
+  it("appends counter when model suffixes collide", () => {
+    const slots: AdapterSlot[] = [
+      { adapter: "opencode", model: "vendor1/qwen-72b-FP8" },
+      { adapter: "opencode", model: "vendor2/llama-70b-FP8" },
+    ];
+    const suffixes = uniqueSlotSuffixes(slots);
+    expect(suffixes[0]).not.toBe(suffixes[1]);
+    expect(suffixes).toEqual(["opencode-fp8", "opencode-fp8-2"]);
+  });
+
+  it("handles three-way collisions", () => {
+    const slots: AdapterSlot[] = [
+      { adapter: "opencode", model: "a/FP8" },
+      { adapter: "opencode", model: "b/FP8" },
+      { adapter: "opencode", model: "c/FP8" },
+    ];
+    const suffixes = uniqueSlotSuffixes(slots);
+    expect(new Set(suffixes).size).toBe(3);
+    expect(suffixes).toEqual([
+      "opencode-fp8",
+      "opencode-fp8-2",
+      "opencode-fp8-3",
+    ]);
+  });
+
+  it("handles duplicate adapters without models", () => {
+    const slots: AdapterSlot[] = [
+      { adapter: "claude-code" },
+      { adapter: "claude-code" },
+    ];
+    const suffixes = uniqueSlotSuffixes(slots);
+    expect(suffixes).toEqual(["cc-default", "cc-default-2"]);
   });
 });
 

@@ -70,6 +70,24 @@ export function slotSuffix(slot: AdapterSlot, allSlots: AdapterSlot[]): string {
   return `${adapterShort}-${modelShort}`;
 }
 
+/**
+ * Compute unique suffixes for all slots, appending a counter when collisions occur.
+ * E.g. two slots that both resolve to "opencode-fp8" become "opencode-fp8" and "opencode-fp8-2".
+ */
+export function uniqueSlotSuffixes(slots: AdapterSlot[]): string[] {
+  const raw = slots.map((s) => slotSuffix(s, slots));
+  const counts = new Map<string, number>();
+  const result: string[] = [];
+
+  for (const suffix of raw) {
+    const prev = counts.get(suffix) ?? 0;
+    counts.set(suffix, prev + 1);
+    result.push(prev === 0 ? suffix : `${suffix}-${prev + 1}`);
+  }
+
+  return result;
+}
+
 /** Shorten adapter names for path-friendly suffixes */
 function shortenAdapter(adapter: string): string {
   const map: Record<string, string> = {
@@ -148,8 +166,11 @@ export async function orchestrateLaunch(
     worktree: WorktreeInfo;
   }> = [];
 
-  for (const slot of slots) {
-    const suffix = slotSuffix(slot, slots);
+  const suffixes = uniqueSlotSuffixes(slots);
+
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i];
+    const suffix = suffixes[i];
     const branch = branchName(groupId, suffix);
     const worktree = await createWorktree({
       repo,

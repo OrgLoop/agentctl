@@ -331,7 +331,22 @@ export class PiRustAdapter implements AgentAdapter {
     const args = ["--print", "--mode", "json", opts.prompt];
 
     if (opts.model) {
-      args.unshift("--model", opts.model);
+      const { provider, model } = parseProviderModel(
+        opts.model,
+        opts.adapterOpts?.provider as string | undefined,
+      );
+      args.unshift("--model", model);
+      if (provider) {
+        args.unshift("--provider", provider);
+      }
+    } else if (opts.adapterOpts?.provider) {
+      args.unshift("--provider", opts.adapterOpts.provider as string);
+    }
+
+    if (opts.appendSystemPrompt || opts.adapterOpts?.appendSystemPrompt) {
+      const text = (opts.appendSystemPrompt ||
+        opts.adapterOpts?.appendSystemPrompt) as string;
+      args.unshift("--append-system-prompt", text);
     }
 
     const env = buildSpawnEnv(undefined, opts.env);
@@ -1020,6 +1035,35 @@ async function getPiRustPids(): Promise<Map<number, PidInfo>> {
   }
 
   return pids;
+}
+
+/**
+ * Parse a "provider/model" string into separate provider and model parts.
+ * If `explicitProvider` is given, it takes precedence over the prefix.
+ * A plain model string (no slash) returns provider = undefined.
+ */
+export function parseProviderModel(
+  raw: string,
+  explicitProvider?: string,
+): { provider: string | undefined; model: string } {
+  if (explicitProvider) {
+    // Strip provider prefix from model if it matches
+    const prefixWithSlash = `${explicitProvider}/`;
+    const model = raw.startsWith(prefixWithSlash)
+      ? raw.slice(prefixWithSlash.length)
+      : raw;
+    return { provider: explicitProvider, model };
+  }
+
+  const slashIdx = raw.indexOf("/");
+  if (slashIdx > 0 && slashIdx < raw.length - 1) {
+    return {
+      provider: raw.slice(0, slashIdx),
+      model: raw.slice(slashIdx + 1),
+    };
+  }
+
+  return { provider: undefined, model: raw };
 }
 
 function extractTextContent(
