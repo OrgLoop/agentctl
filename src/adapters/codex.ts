@@ -176,7 +176,7 @@ export class CodexAdapter implements AgentAdapter {
 
       if (opts?.status && session.status !== opts.status) continue;
 
-      if (!opts?.all && session.status === "stopped") {
+      if (!opts?.all && !opts?.status && session.status === "stopped") {
         const age = Date.now() - session.startedAt.getTime();
         if (age > STOPPED_SESSION_MAX_AGE_MS) continue;
       }

@@ -33,6 +33,7 @@ import {
   parseAdapterSlots,
 } from "./launch-orchestrator.js";
 import { expandMatrix, parseMatrixFile } from "./matrix-parser.js";
+import { shortId } from "./utils/display.js";
 import { createWorktree, type WorktreeInfo } from "./worktree.js";
 
 const adapters: Record<string, AgentAdapter> = {
@@ -264,17 +265,38 @@ program
     const daemonRunning = await ensureDaemon();
 
     if (daemonRunning) {
-      let sessions = await client.call<SessionRecord[]>("session.list", {
+      const result = await client.call<{
+        sessions: SessionRecord[];
+        warnings: string[];
+      }>("session.list", {
         status: opts.status,
         all: opts.all,
         adapter: opts.adapter,
         group: opts.group,
       });
+
+      // Backwards-compat: older daemons return SessionRecord[] directly
+      let sessions: SessionRecord[];
+      let warnings: string[];
+      if (Array.isArray(result)) {
+        sessions = result;
+        warnings = [];
+      } else {
+        sessions = result.sessions;
+        warnings = result.warnings ?? [];
+      }
+
       if (opts.adapter) {
         sessions = sessions.filter((s) => s.adapter === opts.adapter);
       }
+
+      // Print warnings before output
+      for (const w of warnings) {
+        console.error(`Warning: ${w}`);
+      }
+
       if (opts.json) {
-        printJson(sessions);
+        printJson(warnings.length > 0 ? { sessions, warnings } : sessions);
       } else {
         const hasGroups = sessions.some((s) => s.group);
         printTable(sessions.map((s) => formatRecord(s, hasGroups)));
@@ -572,8 +594,8 @@ program
         // Multi-adapter mode: parse from raw args
         slots = parseAdapterSlots(rawArgs);
       } else if (adapterCount === 1 && opts.adapter?.length === 1) {
-        // Single --adapter flag — could still be multi if model is specified
-        // but this is the normal single-adapter path via --adapter flag
+        // Single --adapter flag: populate slots so name resolves correctly
+        slots = [{ adapter: opts.adapter[0], model: opts.model }];
       }
     }
 
@@ -621,7 +643,7 @@ program
             console.log(`  ✗ ${label} — ${r.error}`);
           } else {
             console.log(
-              `  ${label}  → ${shortenPath(r.cwd)}  (${r.sessionId.slice(0, 8)})`,
+              `  ${label}  → ${shortenPath(r.cwd)}  (${shortId(r.sessionId)})`,
             );
           }
         }
@@ -675,7 +697,7 @@ program
           hooks,
         });
         console.log(
-          `Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`,
+          `Launched session ${shortId(session.id)} (PID: ${session.pid})`,
         );
 
         // Run onCreate hook
@@ -712,7 +734,7 @@ program
         hooks,
       });
       console.log(
-        `Launched session ${session.id.slice(0, 8)} (PID: ${session.pid})`,
+        `Launched session ${shortId(session.id)} (PID: ${session.pid})`,
       );
 
       // Run onCreate hook

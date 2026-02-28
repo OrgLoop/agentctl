@@ -217,16 +217,12 @@ agentctl worktree clean ~/code/mono-try-g-a1b2c3-cc --delete-branch
 
 ### Lifecycle Hooks
 
-Hooks are shell commands that run at specific points in a session's lifecycle. Pass them as flags to `launch` or `merge`:
+Hooks are shell commands that run at specific points in a session's lifecycle. Pass them as flags to `launch`:
 
 ```bash
 agentctl launch -p "implement feature X" \
   --on-create "echo 'Session $AGENTCTL_SESSION_ID started'" \
   --on-complete "npm test"
-
-agentctl merge <id> \
-  --pre-merge "npm run lint && npm test" \
-  --post-merge "curl -X POST https://slack.example.com/webhook -d '{\"text\": \"PR merged\"}'"
 ```
 
 Available hooks:
@@ -235,8 +231,6 @@ Available hooks:
 |------|---------|-------------|
 | `--on-create <script>` | After a session is created | Notify, set up environment |
 | `--on-complete <script>` | After a session completes | Run tests, send alerts |
-| `--pre-merge <script>` | Before `agentctl merge` commits | Lint, test, validate |
-| `--post-merge <script>` | After `agentctl merge` pushes/opens PR | Notify, trigger CI |
 
 Hook scripts receive context via environment variables:
 

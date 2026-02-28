@@ -332,29 +332,19 @@ export class OpenClawAdapter implements AgentAdapter {
     }
 
     return result.sessions.map((row) => {
-      const updatedAt = row.updatedAt ?? 0;
-      const model = row.model || result.defaults.model || undefined;
-      const input = row.inputTokens ?? 0;
-      const output = row.outputTokens ?? 0;
-
-      // Gateway is the source of truth: if a session is in the list, it's alive.
-      // Don't guess from timestamps — sessions can be idle for hours between messages.
+      const session = this.mapRowToSession(row, result.defaults);
+      // DiscoveredSession only allows "running"|"stopped"; map "idle"→"stopped"
+      const discoverStatus: "running" | "stopped" =
+        session.status === "running" ? "running" : "stopped";
       return {
-        id: row.sessionId || row.key,
-        status: "running" as const,
+        id: session.id,
+        status: discoverStatus,
         adapter: this.id,
-        model,
-        startedAt: updatedAt > 0 ? new Date(updatedAt) : new Date(),
-        prompt: row.derivedTitle || row.displayName || row.label,
-        tokens: input || output ? { in: input, out: output } : undefined,
-        nativeMetadata: {
-          key: row.key,
-          kind: row.kind,
-          channel: row.channel,
-          displayName: row.displayName,
-          modelProvider: row.modelProvider || result.defaults.modelProvider,
-          lastMessagePreview: row.lastMessagePreview,
-        },
+        model: session.model,
+        startedAt: session.startedAt,
+        prompt: session.prompt,
+        tokens: session.tokens,
+        nativeMetadata: session.meta,
       };
     });
   }

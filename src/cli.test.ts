@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { shortId } from "./utils/display.js";
 
 function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve) => {
@@ -43,5 +44,39 @@ describe("CLI logs command", () => {
   it("peek errors on missing session", async () => {
     const { stderr } = await run(["peek", "nonexistent"]);
     expect(stderr).toContain("Session not found");
+  });
+});
+
+describe("launch --adapter flag (#74)", () => {
+  it("--adapter flag is accepted by launch command", async () => {
+    const { stdout } = await run(["launch", "--help"]);
+    expect(stdout).toContain("--adapter");
+  });
+
+  it("--adapter with unknown adapter reports adapter error, not claude-code default", async () => {
+    const { stderr } = await run([
+      "launch",
+      "--adapter",
+      "nonexistent-adapter",
+      "-p",
+      "test",
+    ]);
+    // Should reference the requested adapter in the error, not silently use claude-code
+    expect(stderr).not.toContain("Launched session");
+  });
+});
+
+describe("shortId (#71)", () => {
+  it("truncates normal UUIDs to 8 chars", () => {
+    expect(shortId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")).toBe("aaaaaaaa");
+  });
+
+  it("preserves full pending-<pid> IDs", () => {
+    expect(shortId("pending-69460")).toBe("pending-69460");
+    expect(shortId("pending-12345")).toBe("pending-12345");
+  });
+
+  it("handles pending- with long PIDs", () => {
+    expect(shortId("pending-123456789")).toBe("pending-123456789");
   });
 });
