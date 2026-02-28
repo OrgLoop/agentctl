@@ -297,7 +297,11 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = ["run", opts.prompt];
+    const args = ["run"];
+    if (opts.model) {
+      args.push("--model", opts.model);
+    }
+    args.push(opts.prompt);
 
     const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
