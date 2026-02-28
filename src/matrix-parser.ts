@@ -12,7 +12,7 @@ export interface MatrixEntry {
 
 /** Top-level matrix file schema */
 export interface MatrixFile {
-  prompt: string;
+  prompt?: string;
   cwd?: string;
   spec?: string;
   hooks?: {
@@ -49,8 +49,8 @@ export async function parseMatrixFile(filePath: string): Promise<MatrixFile> {
     throw new Error(`Invalid matrix file: ${filePath}`);
   }
 
-  if (!parsed.prompt || typeof parsed.prompt !== "string") {
-    throw new Error("Matrix file must have a 'prompt' field (string)");
+  if (parsed.prompt !== undefined && typeof parsed.prompt !== "string") {
+    throw new Error("Matrix file 'prompt' field must be a string");
   }
 
   if (!Array.isArray(parsed.matrix) || parsed.matrix.length === 0) {

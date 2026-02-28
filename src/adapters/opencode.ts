@@ -308,11 +308,16 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
 
+    // Write stdout/stderr to a log file so we don't keep pipes open
+    // (which would prevent full detachment of the child process).
+    const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
+    const logFd = await fs.open(logPath, "w");
+
     const opencodePath = await resolveBinaryPath("opencode");
     const child = spawn(opencodePath, args, {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -324,6 +329,9 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     const pid = child.pid;
     const now = new Date();
+
+    // Close our handle — child keeps its own fd open
+    await logFd.close();
 
     // Generate a pending session ID — will be resolved when OpenCode creates the session file
     const sessionId = pid ? `pending-${pid}` : crypto.randomUUID();
@@ -386,9 +394,14 @@ export class OpenCodeAdapter implements AgentAdapter {
     const cwd = resolved.directory || process.cwd();
 
     const opencodePath = await resolveBinaryPath("opencode");
+
+    await fs.mkdir(this.sessionsMetaDir, { recursive: true });
+    const logPath = path.join(this.sessionsMetaDir, `resume-${Date.now()}.log`);
+    const logFd = await fs.open(logPath, "w");
+
     const child = spawn(opencodePath, ["run", message], {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -397,6 +410,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     });
 
     child.unref();
+    await logFd.close();
   }
 
   async *events(): AsyncIterable<LifecycleEvent> {
