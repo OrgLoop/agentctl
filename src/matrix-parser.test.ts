@@ -64,8 +64,8 @@ matrix:
     ]);
   });
 
-  it("throws on missing prompt", async () => {
-    const filePath = path.join(tmpDir, "bad.yaml");
+  it("allows missing prompt (CLI -p can provide it)", async () => {
+    const filePath = path.join(tmpDir, "no-prompt.yaml");
     await fs.writeFile(
       filePath,
       `
@@ -74,8 +74,24 @@ matrix:
 `,
     );
 
+    const result = await parseMatrixFile(filePath);
+    expect(result.prompt).toBeUndefined();
+    expect(result.matrix).toHaveLength(1);
+  });
+
+  it("throws on non-string prompt", async () => {
+    const filePath = path.join(tmpDir, "bad.yaml");
+    await fs.writeFile(
+      filePath,
+      `
+prompt: 123
+matrix:
+  - adapter: claude-code
+`,
+    );
+
     await expect(parseMatrixFile(filePath)).rejects.toThrow(
-      "must have a 'prompt' field",
+      "'prompt' field must be a string",
     );
   });
 

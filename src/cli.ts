@@ -33,6 +33,7 @@ import {
   parseAdapterSlots,
 } from "./launch-orchestrator.js";
 import { expandMatrix, parseMatrixFile } from "./matrix-parser.js";
+import { loadConfig } from "./utils/config.js";
 import { shortId } from "./utils/display.js";
 import { createWorktree, type WorktreeInfo } from "./worktree.js";
 
@@ -535,7 +536,7 @@ program
 program
   .command("launch [adapter]")
   .description("Launch a new agent session (or multiple with --adapter flags)")
-  .requiredOption("-p, --prompt <text>", "Prompt to send")
+  .option("-p, --prompt <text>", "Prompt to send")
   .option("--spec <path>", "Spec file path")
   .option("--cwd <dir>", "Working directory (default: current directory)")
   .option("--model <model>", "Model to use (e.g. sonnet, opus)")
@@ -556,6 +557,12 @@ program
   .option("--on-complete <script>", "Hook: run after session completes")
   .allowUnknownOption() // Allow interleaved --adapter/--model for parseAdapterSlots
   .action(async (adapterName: string | undefined, opts) => {
+    // Load persistent config defaults; CLI flags override config values
+    const config = await loadConfig();
+    if (!opts.model && config.model) opts.model = config.model;
+    if (!opts.cwd && config.cwd) opts.cwd = config.cwd;
+    if (!adapterName && config.adapter) adapterName = config.adapter;
+
     let cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
 
     // Collect hooks
@@ -575,8 +582,9 @@ program
       try {
         const matrixFile = await parseMatrixFile(opts.matrix);
         slots = expandMatrix(matrixFile);
-        // Matrix can override cwd and prompt
+        // Matrix can override cwd; matrix prompt is used unless CLI -p overrides
         if (matrixFile.cwd) cwd = path.resolve(matrixFile.cwd);
+        if (!opts.prompt && matrixFile.prompt) opts.prompt = matrixFile.prompt;
       } catch (err) {
         console.error(`Failed to parse matrix file: ${(err as Error).message}`);
         process.exit(1);
@@ -597,6 +605,12 @@ program
         // Single --adapter flag: populate slots so name resolves correctly
         slots = [{ adapter: opts.adapter[0], model: opts.model }];
       }
+    }
+
+    // Validate that a prompt is available (required unless matrix provides one)
+    if (!opts.prompt) {
+      console.error("Missing required option: -p, --prompt <text>");
+      process.exit(1);
     }
 
     // --- Parallel launch path ---
