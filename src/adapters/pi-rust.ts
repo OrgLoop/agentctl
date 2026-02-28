@@ -343,10 +343,7 @@ export class PiRustAdapter implements AgentAdapter {
       args.unshift("--provider", opts.adapterOpts.provider as string);
     }
 
-    if (
-      opts.appendSystemPrompt ||
-      opts.adapterOpts?.appendSystemPrompt
-    ) {
+    if (opts.appendSystemPrompt || opts.adapterOpts?.appendSystemPrompt) {
       const text = (opts.appendSystemPrompt ||
         opts.adapterOpts?.appendSystemPrompt) as string;
       args.unshift("--append-system-prompt", text);

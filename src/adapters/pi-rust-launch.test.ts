@@ -39,9 +39,7 @@ let adapter: InstanceType<typeof PiRustAdapter>;
 
 beforeEach(async () => {
   spawnCalls.length = 0;
-  tmpDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), "agentctl-pi-rust-launch-"),
-  );
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-pi-rust-launch-"));
   const sessionDir = path.join(tmpDir, "sessions");
   const sessionsMetaDir = path.join(tmpDir, "agentctl-meta");
   await fs.mkdir(sessionDir, { recursive: true });
@@ -75,15 +73,17 @@ describe("parseProviderModel", () => {
   });
 
   it("uses explicit provider and strips matching prefix", () => {
-    expect(
-      parseProviderModel("togetherai/some-model", "togetherai"),
-    ).toEqual({ provider: "togetherai", model: "some-model" });
+    expect(parseProviderModel("togetherai/some-model", "togetherai")).toEqual({
+      provider: "togetherai",
+      model: "some-model",
+    });
   });
 
   it("uses explicit provider without stripping non-matching prefix", () => {
-    expect(
-      parseProviderModel("some-model", "openrouter"),
-    ).toEqual({ provider: "openrouter", model: "some-model" });
+    expect(parseProviderModel("some-model", "openrouter")).toEqual({
+      provider: "openrouter",
+      model: "some-model",
+    });
   });
 });
 

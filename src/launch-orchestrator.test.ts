@@ -72,7 +72,11 @@ describe("uniqueSlotSuffixes", () => {
       { adapter: "claude-code", model: "claude-sonnet-4-5" },
       { adapter: "codex" },
     ];
-    expect(uniqueSlotSuffixes(slots)).toEqual(["cc-opus", "cc-sonnet", "codex"]);
+    expect(uniqueSlotSuffixes(slots)).toEqual([
+      "cc-opus",
+      "cc-sonnet",
+      "codex",
+    ]);
   });
 
   it("appends counter when model suffixes collide", () => {
@@ -93,7 +97,11 @@ describe("uniqueSlotSuffixes", () => {
     ];
     const suffixes = uniqueSlotSuffixes(slots);
     expect(new Set(suffixes).size).toBe(3);
-    expect(suffixes).toEqual(["opencode-fp8", "opencode-fp8-2", "opencode-fp8-3"]);
+    expect(suffixes).toEqual([
+      "opencode-fp8",
+      "opencode-fp8-2",
+      "opencode-fp8-3",
+    ]);
   });
 
   it("handles duplicate adapters without models", () => {
