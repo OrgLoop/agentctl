@@ -96,6 +96,8 @@ export interface LaunchOpts {
   model?: string;
   env?: Record<string, string>;
   adapterOpts?: Record<string, unknown>;
+  /** Text appended to the agent's system prompt */
+  appendSystemPrompt?: string;
   /** Git worktree options — auto-create worktree before launch */
   worktree?: { repo: string; branch: string };
   /** Lifecycle hooks — shell commands to run at various points */
