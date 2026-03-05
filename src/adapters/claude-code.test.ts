@@ -1090,4 +1090,256 @@ describe("ClaudeCodeAdapter", () => {
       expect(sessions[0].status).toBe("running");
     });
   });
+
+  describe("discover() via history.jsonl", () => {
+    let historyPath: string;
+
+    function makeHistoryLine(
+      sessionId: string,
+      project: string,
+      display: string,
+      timestamp: number,
+    ): string {
+      return JSON.stringify({ sessionId, project, display, timestamp });
+    }
+
+    beforeEach(() => {
+      historyPath = path.join(claudeDir, "history.jsonl");
+    });
+
+    it("discovers sessions from history.jsonl", async () => {
+      const now = Date.now();
+      const lines = [
+        makeHistoryLine("sess-1", "/proj/a", "first prompt", now - 60000),
+        makeHistoryLine("sess-2", "/proj/b", "second prompt", now - 30000),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      expect(sessions).toHaveLength(2);
+
+      const s1 = sessions.find((s) => s.id === "sess-1");
+      const s2 = sessions.find((s) => s.id === "sess-2");
+      expect(s1).toBeDefined();
+      expect(s2).toBeDefined();
+      expect(s1?.cwd).toBe("/proj/a");
+      expect(s1?.prompt).toBe("first prompt");
+      expect(s1?.status).toBe("stopped");
+      expect(s2?.cwd).toBe("/proj/b");
+      expect(s2?.prompt).toBe("second prompt");
+    });
+
+    it("deduplicates multiple prompts per session — uses first prompt", async () => {
+      const now = Date.now();
+      const lines = [
+        makeHistoryLine("sess-dup", "/proj/x", "initial prompt", now - 60000),
+        makeHistoryLine("sess-dup", "/proj/x", "follow up", now - 30000),
+        makeHistoryLine("sess-dup", "/proj/x", "third msg", now - 10000),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("sess-dup");
+      expect(sessions[0].prompt).toBe("initial prompt");
+    });
+
+    it("marks session running when PID matches by session ID in args", async () => {
+      const now = Date.now();
+      const lines = [
+        makeHistoryLine("running-sess", "/proj/r", "test", now - 5000),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(42000, {
+        pid: 42000,
+        cwd: "/proj/r",
+        args: "claude --continue running-sess",
+        startTime: new Date(now - 4000).toString(),
+      });
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => pidMap,
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].status).toBe("running");
+      expect(sessions[0].pid).toBe(42000);
+    });
+
+    it("marks session running via cwd match", async () => {
+      const now = Date.now();
+      const lines = [
+        makeHistoryLine("cwd-sess", "/proj/cwd", "test", now - 5000),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const pidMap = new Map<number, PidInfo>();
+      pidMap.set(43000, {
+        pid: 43000,
+        cwd: "/proj/cwd",
+        args: "claude --dangerously-skip-permissions --print",
+        startTime: new Date(now - 4000).toString(),
+      });
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => pidMap,
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      const sess = sessions.find((s) => s.id === "cwd-sess");
+      expect(sess?.status).toBe("running");
+      expect(sess?.pid).toBe(43000);
+    });
+
+    it("marks session running via persisted metadata for detached process", async () => {
+      const now = Date.now();
+      const lines = [
+        makeHistoryLine("detached-hist", "/proj/d", "test", now - 60000),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const meta: LaunchedSessionMeta = {
+        sessionId: "detached-hist",
+        pid: 55000,
+        startTime: new Date(now - 59000).toString(),
+        cwd: "/proj/d",
+        launchedAt: new Date(now - 60000).toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, "detached-hist.json"),
+        JSON.stringify(meta),
+      );
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => new Map(),
+        isProcessAlive: (pid) => pid === 55000,
+      });
+
+      const sessions = await historyAdapter.discover();
+      const sess = sessions.find((s) => s.id === "detached-hist");
+      expect(sess?.status).toBe("running");
+      expect(sess?.pid).toBe(55000);
+    });
+
+    it("does not include model or tokens (deferred to status)", async () => {
+      const now = Date.now();
+      const lines = [
+        makeHistoryLine("no-model", "/proj/nm", "test", now - 1000),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].model).toBeUndefined();
+      expect(sessions[0].tokens).toBeUndefined();
+    });
+
+    it("falls back to project dir scanning when history.jsonl missing", async () => {
+      // Don't create history.jsonl — adapter should fall back
+      const now = new Date();
+      await createFakeProject("fallback-proj", [
+        {
+          id: "fallback-session-0000-000000000000",
+          firstPrompt: "fallback test",
+          created: now.toISOString(),
+          modified: now.toISOString(),
+          messages: [],
+        },
+      ]);
+
+      const fallbackAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath: path.join(tmpDir, "nonexistent-history.jsonl"),
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await fallbackAdapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("fallback-session-0000-000000000000");
+      expect(sessions[0].cwd).toBe("/Users/test/fallback-proj");
+    });
+
+    it("skips malformed lines in history.jsonl", async () => {
+      const now = Date.now();
+      const lines = [
+        "not json at all",
+        makeHistoryLine("good-sess", "/proj/g", "valid", now),
+        '{"incomplete": true}', // missing sessionId/project
+        "",
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe("good-sess");
+    });
+
+    it("truncates long prompts to 200 chars", async () => {
+      const now = Date.now();
+      const longPrompt = "x".repeat(500);
+      const lines = [
+        makeHistoryLine("long-prompt", "/proj/lp", longPrompt, now),
+      ];
+      await fs.writeFile(historyPath, lines.join("\n"));
+
+      const historyAdapter = new ClaudeCodeAdapter({
+        claudeDir,
+        sessionsMetaDir,
+        historyPath,
+        getPids: async () => new Map(),
+        isProcessAlive: () => false,
+      });
+
+      const sessions = await historyAdapter.discover();
+      expect(sessions[0].prompt).toHaveLength(200);
+    });
+  });
 });

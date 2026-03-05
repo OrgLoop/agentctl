@@ -54,6 +54,16 @@ export interface ClaudeCodeAdapterOpts {
   getPids?: () => Promise<Map<number, PidInfo>>; // Override PID detection for testing
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
+  /** Override history.jsonl path for testing */
+  historyPath?: string;
+}
+
+/** A single line from ~/.claude/history.jsonl */
+interface HistoryEntry {
+  display: string;
+  timestamp: number;
+  project: string;
+  sessionId: string;
 }
 
 interface SessionIndexEntry {
@@ -108,6 +118,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private readonly claudeDir: string;
   private readonly projectsDir: string;
   private readonly sessionsMetaDir: string;
+  private readonly historyPath: string;
   private readonly getPids: () => Promise<Map<number, PidInfo>>;
   private readonly isProcessAlive: (pid: number) => boolean;
 
@@ -117,11 +128,164 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     this.sessionsMetaDir =
       opts?.sessionsMetaDir ||
       path.join(this.claudeDir, "agentctl", "sessions");
+    this.historyPath =
+      opts?.historyPath || path.join(this.claudeDir, "history.jsonl");
     this.getPids = opts?.getPids || getClaudePids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
   }
 
   async discover(): Promise<DiscoveredSession[]> {
+    // Try fast path: read history.jsonl (single file, ~2ms)
+    const historyResults = await this.discoverFromHistory();
+    if (historyResults) return historyResults;
+
+    // Fallback: scan project directories (slow path)
+    return this.discoverFromProjectDirs();
+  }
+
+  /**
+   * Fast discovery via ~/.claude/history.jsonl — single file read.
+   * Returns null if history.jsonl doesn't exist (triggers fallback).
+   * Defers expensive fields (model, tokens) to status() calls.
+   */
+  private async discoverFromHistory(): Promise<DiscoveredSession[] | null> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.historyPath, "utf-8");
+    } catch {
+      return null; // history.jsonl doesn't exist — use fallback
+    }
+
+    // Parse all lines, group by sessionId (first entry = first prompt, last = latest timestamp)
+    const sessionMap = new Map<
+      string,
+      { firstPrompt: string; project: string; firstTs: number; lastTs: number }
+    >();
+
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as HistoryEntry;
+        if (!entry.sessionId || !entry.project) continue;
+
+        const existing = sessionMap.get(entry.sessionId);
+        if (existing) {
+          if (entry.timestamp > existing.lastTs) {
+            existing.lastTs = entry.timestamp;
+          }
+          if (entry.timestamp < existing.firstTs) {
+            existing.firstTs = entry.timestamp;
+            existing.firstPrompt = entry.display;
+          }
+        } else {
+          sessionMap.set(entry.sessionId, {
+            firstPrompt: entry.display,
+            project: entry.project,
+            firstTs: entry.timestamp,
+            lastTs: entry.timestamp,
+          });
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    // Cross-reference with running PIDs
+    const runningPids = await this.getPids();
+    const runningCwds = new Map<string, { pid: number; info: PidInfo }>();
+    const runningSessionIds = new Set<string>();
+
+    for (const [pid, info] of runningPids) {
+      if (info.cwd) {
+        runningCwds.set(info.cwd, { pid, info });
+      }
+      // Extract session IDs from args (e.g. --continue <sessionId>)
+      for (const [sid] of sessionMap) {
+        if (info.args.includes(sid)) {
+          runningSessionIds.add(sid);
+        }
+      }
+    }
+
+    const results: DiscoveredSession[] = [];
+
+    for (const [sessionId, data] of sessionMap) {
+      const startedAt = new Date(data.firstTs);
+      const lastActivity = new Date(data.lastTs);
+
+      // Determine running status
+      let isRunning = false;
+      let pid: number | undefined;
+
+      if (runningSessionIds.has(sessionId)) {
+        // Session ID found in process args — most reliable
+        for (const [p, info] of runningPids) {
+          if (
+            info.args.includes(sessionId) &&
+            this.processStartedAfterSession(info, data.firstTs)
+          ) {
+            isRunning = true;
+            pid = p;
+            break;
+          }
+        }
+      }
+
+      if (!isRunning) {
+        // Check by cwd match
+        const match = runningCwds.get(data.project);
+        if (
+          match &&
+          this.processStartedAfterSession(match.info, data.firstTs)
+        ) {
+          isRunning = true;
+          pid = match.pid;
+        }
+      }
+
+      if (!isRunning) {
+        // Check persisted metadata for detached processes
+        const meta = await this.readSessionMeta(sessionId);
+        if (meta?.pid && this.isProcessAlive(meta.pid)) {
+          if (meta.startTime) {
+            const metaStartMs = new Date(meta.startTime).getTime();
+            const sessionMs = new Date(meta.launchedAt).getTime();
+            if (!Number.isNaN(metaStartMs) && metaStartMs >= sessionMs - 5000) {
+              isRunning = true;
+              pid = meta.pid;
+            } else {
+              await this.deleteSessionMeta(sessionId);
+            }
+          } else {
+            isRunning = true;
+            pid = meta.pid;
+          }
+        } else if (meta?.pid) {
+          await this.deleteSessionMeta(sessionId);
+        }
+      }
+
+      results.push({
+        id: sessionId,
+        status: isRunning ? "running" : "stopped",
+        adapter: this.id,
+        cwd: data.project,
+        // model and tokens deferred to status() for performance
+        startedAt,
+        stoppedAt: isRunning ? undefined : lastActivity,
+        pid,
+        prompt: data.firstPrompt?.slice(0, 200),
+        nativeMetadata: {
+          projectDir: data.project,
+        },
+      });
+    }
+
+    return results;
+  }
+
+  /** Slow fallback: scan all project directories */
+  private async discoverFromProjectDirs(): Promise<DiscoveredSession[]> {
     const runningPids = await this.getPids();
     const results: DiscoveredSession[] = [];
 
@@ -147,21 +311,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
           index,
           runningPids,
         );
-        const { model, tokens } = await this.parseSessionTail(entry.fullPath);
 
         results.push({
           id: entry.sessionId,
           status: isRunning ? "running" : "stopped",
           adapter: this.id,
           cwd: index.originalPath || entry.projectPath,
-          model,
+          // model and tokens deferred to status() for performance
           startedAt: new Date(entry.created),
           stoppedAt: isRunning ? undefined : new Date(entry.modified),
           pid: isRunning
             ? await this.findMatchingPid(entry, index, runningPids)
             : undefined,
           prompt: entry.firstPrompt?.slice(0, 200),
-          tokens,
           nativeMetadata: {
             projectDir: index.originalPath || entry.projectPath,
             gitBranch: entry.gitBranch,
@@ -965,56 +1127,80 @@ async function getClaudePids(): Promise<Map<number, PidInfo>> {
   try {
     const { stdout } = await execFileAsync("ps", ["aux"]);
 
+    // First pass: collect all matching PIDs and their commands
+    const candidates: Array<{ pid: number; command: string }> = [];
     for (const line of stdout.split("\n")) {
       if (!line.includes("claude") || line.includes("grep")) continue;
 
-      // Extract PID (second field) and command (everything after 10th field)
       const fields = line.trim().split(/\s+/);
       if (fields.length < 11) continue;
       const pid = parseInt(fields[1], 10);
       const command = fields.slice(10).join(" ");
 
-      // Only match lines where the command starts with "claude --"
-      // This excludes wrappers (tclsh, bash, screen, login) and
-      // interactive claude sessions (just "claude" with no flags)
       if (!command.startsWith("claude --")) continue;
       if (pid === process.pid) continue;
 
-      // Try to extract working directory from lsof
-      let cwd = "";
-      try {
-        const { stdout: lsofOut } = await execFileAsync("/usr/sbin/lsof", [
-          "-p",
-          pid.toString(),
-          "-Fn",
-        ]);
-        // lsof output: "fcwd\nn/actual/path\n..." — find fcwd line, then next n line
-        const lsofLines = lsofOut.split("\n");
-        for (let i = 0; i < lsofLines.length; i++) {
-          if (lsofLines[i] === "fcwd" && lsofLines[i + 1]?.startsWith("n")) {
-            cwd = lsofLines[i + 1].slice(1); // strip leading "n"
-            break;
-          }
+      candidates.push({ pid, command });
+    }
+
+    if (candidates.length === 0) return pids;
+
+    const pidList = candidates.map((c) => c.pid);
+
+    // Batch lsof: one call for all PIDs
+    const cwdMap = new Map<number, string>();
+    try {
+      const { stdout: lsofOut } = await execFileAsync("/usr/sbin/lsof", [
+        "-p",
+        pidList.join(","),
+        "-Fn",
+        "-d",
+        "cwd",
+      ]);
+      // lsof output groups by PID: "p<pid>\nfcwd\nn<path>\n..."
+      let currentPid = 0;
+      const lsofLines = lsofOut.split("\n");
+      for (let i = 0; i < lsofLines.length; i++) {
+        const line = lsofLines[i];
+        if (line.startsWith("p")) {
+          currentPid = parseInt(line.slice(1), 10);
+        } else if (line.startsWith("n") && currentPid) {
+          cwdMap.set(currentPid, line.slice(1));
         }
-      } catch {
-        // lsof might fail — that's fine
       }
+    } catch {
+      // lsof might fail — that's fine
+    }
 
-      // Get process start time for PID recycling detection
-      let startTime: string | undefined;
-      try {
-        const { stdout: lstart } = await execFileAsync("ps", [
-          "-p",
-          pid.toString(),
-          "-o",
-          "lstart=",
-        ]);
-        startTime = lstart.trim() || undefined;
-      } catch {
-        // ps might fail — that's fine
+    // Batch ps for start times: one call for all PIDs
+    const startTimeMap = new Map<number, string>();
+    try {
+      const { stdout: psOut } = await execFileAsync("ps", [
+        "-p",
+        pidList.join(","),
+        "-o",
+        "pid=,lstart=",
+      ]);
+      for (const line of psOut.trim().split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        // Format: "  PID  Day Mon DD HH:MM:SS YYYY"
+        const match = trimmed.match(/^(\d+)\s+(.+)$/);
+        if (match) {
+          startTimeMap.set(parseInt(match[1], 10), match[2].trim());
+        }
       }
+    } catch {
+      // ps might fail — that's fine
+    }
 
-      pids.set(pid, { pid, cwd, args: command, startTime });
+    for (const { pid, command } of candidates) {
+      pids.set(pid, {
+        pid,
+        cwd: cwdMap.get(pid) || "",
+        args: command,
+        startTime: startTimeMap.get(pid),
+      });
     }
   } catch {
     // ps failed — return empty
