@@ -47,6 +47,27 @@ describe("CLI logs command", () => {
   });
 });
 
+describe("launch --file flag (#92)", () => {
+  it("--file flag appears in launch --help", async () => {
+    const { stdout } = await run(["launch", "--help"]);
+    expect(stdout).toContain("--file");
+    expect(stdout).toContain("--max-file-size");
+  });
+
+  it("errors when --file references a nonexistent file", async () => {
+    const { stderr } = await run([
+      "launch",
+      "--adapter",
+      "claude-code",
+      "-p",
+      "test",
+      "--file",
+      "/tmp/nonexistent-agentctl-test-file.txt",
+    ]);
+    expect(stderr).toContain("File not found");
+  });
+});
+
 describe("launch --adapter flag (#74)", () => {
   it("--adapter flag is accepted by launch command", async () => {
     const { stdout } = await run(["launch", "--help"]);
