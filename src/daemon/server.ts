@@ -519,7 +519,7 @@ function createRequestHandler(ctx: HandlerContext) {
       }
 
       case "session.peek": {
-        // Auto-detect adapter from tracked session, fall back to param or claude-code
+        // Auto-detect adapter from tracked session
         let tracked = ctx.sessionTracker.getSession(params.id as string);
         let peekId = tracked?.id || (params.id as string);
 
@@ -533,13 +533,28 @@ function createRequestHandler(ctx: HandlerContext) {
           }
         }
 
-        const adapterName =
-          (params.adapter as string) || tracked?.adapter || "claude-code";
-        const adapter = ctx.adapters[adapterName];
-        if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
-        return adapter.peek(peekId, {
-          lines: params.lines as number | undefined,
-        });
+        const adapterName = (params.adapter as string) || tracked?.adapter;
+
+        // If we know the adapter, use it directly
+        if (adapterName) {
+          const adapter = ctx.adapters[adapterName];
+          if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
+          return adapter.peek(peekId, {
+            lines: params.lines as number | undefined,
+          });
+        }
+
+        // No tracked adapter — try all adapters (don't assume claude-code)
+        for (const [, adapter] of Object.entries(ctx.adapters)) {
+          try {
+            return await adapter.peek(peekId, {
+              lines: params.lines as number | undefined,
+            });
+          } catch {
+            // Try next adapter
+          }
+        }
+        throw new Error(`Session not found: ${peekId}`);
       }
 
       case "session.launch": {

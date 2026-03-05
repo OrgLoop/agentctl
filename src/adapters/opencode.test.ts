@@ -493,12 +493,64 @@ describe("OpenCodeAdapter", () => {
       const output = await adapter.peek(session.id);
       expect(output).toContain("Content field text");
     });
+
+    it("only reads parts for the last N assistant messages (not all)", async () => {
+      // Regression test: peek should NOT read parts for messages outside
+      // the requested window. With 50 assistant messages and lines=3, only
+      // the last 3 should have their parts read.
+      const session = makeSession();
+      const messages: OpenCodeMessageFile[] = [];
+      const parts: Record<
+        string,
+        Array<{ file: string; content: string }>
+      > = {};
+
+      for (let i = 0; i < 50; i++) {
+        const msgId = `msg-bulk-${i.toString().padStart(3, "0")}`;
+        messages.push(
+          makeMessage({
+            id: msgId,
+            role: "assistant",
+            time: {
+              created: new Date(Date.now() + i * 1000).toISOString(),
+              completed: new Date(Date.now() + i * 1000 + 500).toISOString(),
+            },
+          }),
+        );
+        parts[msgId] = [
+          {
+            file: "part-001.json",
+            content: JSON.stringify({ text: `Bulk message ${i}` }),
+          },
+        ];
+      }
+
+      await createFakeSession(
+        session.directory || "",
+        session,
+        messages,
+        parts,
+      );
+
+      const output = await adapter.peek(session.id, { lines: 3 });
+      // Should contain only the last 3 messages
+      expect(output).toContain("Bulk message 47");
+      expect(output).toContain("Bulk message 48");
+      expect(output).toContain("Bulk message 49");
+      // Should NOT contain earlier messages
+      expect(output).not.toContain("Bulk message 0");
+      expect(output).not.toContain("Bulk message 46");
+    });
   });
 
   describe("status()", () => {
     it("returns session details", async () => {
       const session = makeSession({
         title: "Status check session",
+        time: {
+          created: new Date(Date.now() - 3600_000).toISOString(),
+          updated: new Date(Date.now() - 120_000).toISOString(),
+        },
       });
       const msg = makeMessage({
         model: {
@@ -536,6 +588,65 @@ describe("OpenCodeAdapter", () => {
 
       const result = await adapter.status("abcdef99");
       expect(result.id).toBe("abcdef99-1111-2222-3333-444444444444");
+    });
+
+    it("detects running session via persisted metadata without getPids", async () => {
+      // status() should use lightweight PID check (persisted meta + isProcessAlive)
+      // instead of expensive getOpenCodePids() (ps aux + lsof per process)
+      const session = makeSession({
+        id: "running-status-0000-1111-222222222222",
+        time: {
+          created: new Date(Date.now() - 3600_000).toISOString(),
+          // Updated long ago — NOT recently, so recency heuristic won't trigger
+          updated: new Date(Date.now() - 3600_000).toISOString(),
+        },
+      });
+      await createFakeSession(session.directory || "", session);
+
+      // Write persisted session metadata with a fake PID
+      const meta: LaunchedSessionMeta = {
+        sessionId: session.id,
+        pid: 99999,
+        cwd: session.directory || "",
+        launchedAt: new Date(Date.now() - 3600_000).toISOString(),
+      };
+      await fs.writeFile(
+        path.join(sessionsMetaDir, `${session.id}.json`),
+        JSON.stringify(meta),
+      );
+
+      // Create adapter where getPids is never called but isProcessAlive returns true
+      let getPidsCalled = false;
+      const aliveAdapter = new OpenCodeAdapter({
+        storageDir,
+        sessionsMetaDir,
+        getPids: async () => {
+          getPidsCalled = true;
+          return new Map();
+        },
+        isProcessAlive: (pid) => pid === 99999,
+      });
+
+      const result = await aliveAdapter.status(session.id);
+      expect(result.status).toBe("running");
+      expect(result.pid).toBe(99999);
+      // status() should NOT call getPids — that's the whole optimization
+      expect(getPidsCalled).toBe(false);
+    });
+
+    it("detects running session via recent update heuristic", async () => {
+      const session = makeSession({
+        id: "recent-status-0000-1111-222222222222",
+        time: {
+          created: new Date(Date.now() - 3600_000).toISOString(),
+          // Updated 10 seconds ago — recency heuristic should trigger
+          updated: new Date(Date.now() - 10_000).toISOString(),
+        },
+      });
+      await createFakeSession(session.directory || "", session);
+
+      const result = await adapter.status(session.id);
+      expect(result.status).toBe("running");
     });
   });
 
