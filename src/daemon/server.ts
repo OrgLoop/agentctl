@@ -648,6 +648,39 @@ function createRequestHandler(ctx: HandlerContext) {
         return null;
       }
 
+      case "session.kill": {
+        const session = ctx.sessionTracker.getSession(params.id as string);
+        if (!session) throw new Error(`Session not found: ${params.id}`);
+        const force = params.force as boolean | undefined;
+
+        // If session is still running, try to stop the process first
+        if (session.status === "running" || session.status === "idle") {
+          if (session.pid) {
+            try {
+              process.kill(session.pid, force ? "SIGKILL" : "SIGTERM");
+            } catch {
+              // Already dead
+            }
+          }
+        }
+
+        // Remove auto-lock
+        ctx.lockManager.autoUnlock(session.id);
+
+        // Remove session record from store
+        ctx.sessionTracker.removeSession(session.id);
+        ctx.metrics.recordSessionStopped();
+
+        return null;
+      }
+
+      case "session.prune": {
+        const maxAgeMs =
+          ((params.maxAgeHours as number) || 24) * 60 * 60 * 1000;
+        const pruned = ctx.sessionTracker.pruneSessions(maxAgeMs);
+        return { pruned };
+      }
+
       case "session.resume": {
         const id = params.id as string;
         let launchRecord = ctx.sessionTracker.getSession(id);
@@ -673,17 +706,6 @@ function createRequestHandler(ctx: HandlerContext) {
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
         await adapter.resume(resumeId, params.message as string);
         return null;
-      }
-
-      // --- Prune command (#40) --- kept for CLI backward compat
-      case "session.prune": {
-        // In the stateless model, there's no session registry to prune.
-        // Clean up dead launches (PID liveness check) as a best-effort action.
-        const deadIds = ctx.sessionTracker.cleanupDeadLaunches();
-        for (const id of deadIds) {
-          ctx.lockManager.autoUnlock(id);
-        }
-        return { pruned: deadIds.length };
       }
 
       case "lock.list":

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import type {
   AgentAdapter,
   AgentSession,
@@ -9,6 +10,8 @@ export interface SessionTrackerOpts {
   adapters: Record<string, AgentAdapter>;
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
+  /** Override process command lookup for testing (default: ps -p <pid> -o command=) */
+  getProcessCommand?: (pid: number) => string | null;
 }
 
 /**
@@ -35,11 +38,13 @@ export class SessionTracker {
   private readonly isProcessAlive: (pid: number) => boolean;
   private cleanupHandle: ReturnType<typeof setInterval> | null = null;
   private pendingResolutionHandle: ReturnType<typeof setInterval> | null = null;
+  private readonly getProcessCommand: (pid: number) => string | null;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
     this.adapters = opts.adapters;
     this.isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
+    this.getProcessCommand = opts.getProcessCommand ?? defaultGetProcessCommand;
   }
 
   /**
@@ -209,9 +214,48 @@ export class SessionTracker {
     return undefined;
   }
 
-  /** Remove a session from launch metadata */
-  removeSession(sessionId: string): void {
-    this.state.removeSession(sessionId);
+  activeCount(): number {
+    return Object.values(this.state.getSessions()).filter(
+      (s) => s.status === "running" || s.status === "idle",
+    ).length;
+  }
+
+  /** Resolve a session ID (exact or prefix) to the full ID */
+  resolveSessionId(id: string): string | undefined {
+    if (this.state.getSession(id)) return id;
+    const sessions = this.state.getSessions();
+    const matches = Object.entries(sessions).filter(([key]) =>
+      key.startsWith(id),
+    );
+    if (matches.length === 1) return matches[0][0];
+    return undefined;
+  }
+
+  /** Remove a session from the store. Returns true if removed. */
+  removeSession(id: string): boolean {
+    const fullId = this.resolveSessionId(id);
+    if (!fullId) return false;
+    this.state.removeSession(fullId);
+    return true;
+  }
+
+  /** Remove stopped/completed/failed sessions older than maxAgeMs. Returns count pruned. */
+  pruneSessions(maxAgeMs: number = 24 * 60 * 60 * 1000): number {
+    const sessions = this.state.getSessions();
+    const now = Date.now();
+    let pruned = 0;
+
+    for (const [id, record] of Object.entries(sessions)) {
+      if (record.status === "running" || record.status === "idle") continue;
+      const timestamp = record.stoppedAt || record.startedAt;
+      const age = now - new Date(timestamp).getTime();
+      if (age > maxAgeMs) {
+        this.state.removeSession(id);
+        pruned++;
+      }
+    }
+
+    return pruned;
   }
 
   /** Called when a session stops — marks it in launch metadata, returns the record */
@@ -317,7 +361,21 @@ export class SessionTracker {
       )
         continue;
 
-      if (record.pid && !this.isProcessAlive(record.pid)) {
+      if (!record.pid) continue;
+
+      let shouldReap = false;
+
+      if (!this.isProcessAlive(record.pid)) {
+        shouldReap = true;
+      } else {
+        // PID is alive — check if it was reused by a different process
+        const cmd = this.getProcessCommand(record.pid);
+        if (cmd !== null && !isExpectedCommand(cmd, record.adapter)) {
+          shouldReap = true;
+        }
+      }
+
+      if (shouldReap) {
         this.state.setSession(id, {
           ...record,
           status: "stopped",
@@ -338,6 +396,31 @@ function defaultIsProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/** Get the command string for a PID via ps */
+function defaultGetProcessCommand(pid: number): string | null {
+  try {
+    const stdout = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf-8",
+      timeout: 2000,
+    });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Known command patterns per adapter — used to detect PID reuse */
+const ADAPTER_COMMAND_PATTERNS: Record<string, RegExp> = {
+  "claude-code": /\bclaude\b/,
+};
+
+/** Check if the process command matches what we expect for this adapter */
+function isExpectedCommand(command: string, adapter: string): boolean {
+  const pattern = ADAPTER_COMMAND_PATTERNS[adapter];
+  if (!pattern) return true; // Unknown adapter — can't validate, assume OK
+  return pattern.test(command);
 }
 
 /**
