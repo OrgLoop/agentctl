@@ -17,6 +17,12 @@ import type {
 } from "../core/types.js";
 import { buildSpawnEnv } from "../utils/daemon-env.js";
 import { readHead, readTail } from "../utils/partial-read.js";
+import {
+  cleanupPromptFile,
+  isLargePrompt,
+  openPromptFd,
+  writePromptFile,
+} from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
@@ -451,7 +457,18 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       args.push("--model", opts.model);
     }
 
-    args.push("-p", opts.prompt);
+    // For large prompts, pipe via stdin instead of CLI args to avoid
+    // OS argv size limits (ARG_MAX). Claude reads from stdin when -p is absent.
+    const useTempFile = isLargePrompt(opts.prompt);
+    let promptFilePath: string | undefined;
+    let promptFd: Awaited<ReturnType<typeof openPromptFd>> | undefined;
+
+    if (useTempFile) {
+      promptFilePath = await writePromptFile(opts.prompt);
+      promptFd = await openPromptFd(promptFilePath);
+    } else {
+      args.push("-p", opts.prompt);
+    }
 
     const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
@@ -467,7 +484,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const child = spawn(claudePath, args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, logFd.fd],
+      stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -483,8 +500,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const pid = child.pid;
     const now = new Date();
 
-    // Close our handle — child keeps its own fd open
+    // Close our handles — child keeps its own fds open
     await logFd.close();
+    if (promptFd) await promptFd.close();
+    if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
     // Try to extract the real Claude Code session ID from the log output.
     // Claude Code's stream-json format emits a line with sessionId early on.

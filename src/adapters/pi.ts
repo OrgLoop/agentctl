@@ -16,6 +16,12 @@ import type {
   StopOpts,
 } from "../core/types.js";
 import { buildSpawnEnv } from "../utils/daemon-env.js";
+import {
+  cleanupPromptFile,
+  isLargePrompt,
+  openPromptFd,
+  writePromptFile,
+} from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
@@ -323,7 +329,20 @@ export class PiAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = ["-p", opts.prompt, "--mode", "json"];
+    // For large prompts, pipe via stdin instead of CLI args to avoid
+    // OS argv size limits (ARG_MAX).
+    const useTempFile = isLargePrompt(opts.prompt);
+    let promptFilePath: string | undefined;
+    let promptFd: Awaited<ReturnType<typeof openPromptFd>> | undefined;
+
+    const args = useTempFile
+      ? ["--mode", "json"]
+      : ["-p", opts.prompt, "--mode", "json"];
+
+    if (useTempFile) {
+      promptFilePath = await writePromptFile(opts.prompt);
+      promptFd = await openPromptFd(promptFilePath);
+    }
 
     if (opts.model) {
       args.unshift("--model", opts.model);
@@ -341,7 +360,7 @@ export class PiAdapter implements AgentAdapter {
     const child = spawn(piPath, args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, logFd.fd],
+      stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -355,8 +374,10 @@ export class PiAdapter implements AgentAdapter {
     const pid = child.pid;
     const now = new Date();
 
-    // Close our handle — child keeps its own fd open
+    // Close our handles — child keeps its own fds open
     await logFd.close();
+    if (promptFd) await promptFd.close();
+    if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
     // Try to extract the session ID from the JSON-mode stdout output.
     // Pi's first JSON line has type: "session" with an id field.
