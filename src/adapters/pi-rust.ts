@@ -16,6 +16,12 @@ import type {
   StopOpts,
 } from "../core/types.js";
 import { buildSpawnEnv } from "../utils/daemon-env.js";
+import {
+  cleanupPromptFile,
+  isLargePrompt,
+  openPromptFd,
+  writePromptFile,
+} from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
@@ -328,7 +334,20 @@ export class PiRustAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = ["--print", "--mode", "json", opts.prompt];
+    // For large prompts, pipe via stdin instead of CLI args to avoid
+    // OS argv size limits (ARG_MAX).
+    const useTempFile = isLargePrompt(opts.prompt);
+    let promptFilePath: string | undefined;
+    let promptFd: Awaited<ReturnType<typeof openPromptFd>> | undefined;
+
+    const args = useTempFile
+      ? ["--print", "--mode", "json"]
+      : ["--print", "--mode", "json", opts.prompt];
+
+    if (useTempFile) {
+      promptFilePath = await writePromptFile(opts.prompt);
+      promptFd = await openPromptFd(promptFilePath);
+    }
 
     if (opts.model) {
       const { provider, model } = parseProviderModel(
@@ -361,7 +380,7 @@ export class PiRustAdapter implements AgentAdapter {
     const child = spawn(piRustPath, args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, "ignore"],
+      stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, "ignore"],
       detached: true,
     });
 
@@ -375,6 +394,8 @@ export class PiRustAdapter implements AgentAdapter {
     const now = new Date();
 
     await logFd.close();
+    if (promptFd) await promptFd.close();
+    if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
     // Try to extract the real session ID from the JSONL output
     let resolvedSessionId: string | undefined;

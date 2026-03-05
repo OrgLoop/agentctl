@@ -16,6 +16,12 @@ import type {
   StopOpts,
 } from "../core/types.js";
 import { buildSpawnEnv } from "../utils/daemon-env.js";
+import {
+  cleanupPromptFile,
+  isLargePrompt,
+  openPromptFd,
+  writePromptFile,
+} from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
@@ -301,7 +307,19 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (opts.model) {
       args.push("--model", opts.model);
     }
-    args.push(opts.prompt);
+
+    // For large prompts, pipe via stdin instead of CLI args to avoid
+    // OS argv size limits (ARG_MAX).
+    const useTempFile = isLargePrompt(opts.prompt);
+    let promptFilePath: string | undefined;
+    let promptFd: Awaited<ReturnType<typeof openPromptFd>> | undefined;
+
+    if (useTempFile) {
+      promptFilePath = await writePromptFile(opts.prompt);
+      promptFd = await openPromptFd(promptFilePath);
+    } else {
+      args.push(opts.prompt);
+    }
 
     const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();
@@ -317,7 +335,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     const child = spawn(opencodePath, args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, logFd.fd],
+      stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -330,8 +348,10 @@ export class OpenCodeAdapter implements AgentAdapter {
     const pid = child.pid;
     const now = new Date();
 
-    // Close our handle — child keeps its own fd open
+    // Close our handles — child keeps its own fds open
     await logFd.close();
+    if (promptFd) await promptFd.close();
+    if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
     // Generate a pending session ID — will be resolved when OpenCode creates the session file
     const sessionId = pid ? `pending-${pid}` : crypto.randomUUID();

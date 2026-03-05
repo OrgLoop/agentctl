@@ -16,6 +16,12 @@ import type {
   StopOpts,
 } from "../core/types.js";
 import { buildSpawnEnv } from "../utils/daemon-env.js";
+import {
+  cleanupPromptFile,
+  isLargePrompt,
+  openPromptFd,
+  writePromptFile,
+} from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
 
 const execFileAsync = promisify(execFile);
@@ -252,7 +258,19 @@ export class CodexAdapter implements AgentAdapter {
 
     const cwd = opts.cwd || process.cwd();
     args.push("--cd", cwd);
-    args.push(opts.prompt);
+
+    // For large prompts, pipe via stdin instead of CLI args to avoid
+    // OS argv size limits (ARG_MAX).
+    const useTempFile = isLargePrompt(opts.prompt);
+    let promptFilePath: string | undefined;
+    let promptFd: Awaited<ReturnType<typeof openPromptFd>> | undefined;
+
+    if (useTempFile) {
+      promptFilePath = await writePromptFile(opts.prompt);
+      promptFd = await openPromptFd(promptFilePath);
+    } else {
+      args.push(opts.prompt);
+    }
 
     const env = buildSpawnEnv(undefined, opts.env);
 
@@ -264,7 +282,7 @@ export class CodexAdapter implements AgentAdapter {
     const child = spawn(codexPath, args, {
       cwd,
       env,
-      stdio: ["ignore", logFd.fd, "ignore"],
+      stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, "ignore"],
       detached: true,
     });
 
@@ -278,6 +296,8 @@ export class CodexAdapter implements AgentAdapter {
     const now = new Date();
 
     await logFd.close();
+    if (promptFd) await promptFd.close();
+    if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
     // Poll for thread_id from JSONL output
     let resolvedSessionId: string | undefined;
