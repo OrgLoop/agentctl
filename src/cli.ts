@@ -26,6 +26,7 @@ import type {
 } from "./core/types.js";
 import type { DaemonStatus } from "./daemon/server.js";
 import type { FuseTimer, Lock, SessionRecord } from "./daemon/state.js";
+import { buildFileContext, prependToPrompt } from "./file-context.js";
 import { runHook } from "./hooks.js";
 import {
   type AdapterSlot,
@@ -537,7 +538,18 @@ program
   .command("launch [adapter]")
   .description("Launch a new agent session (or multiple with --adapter flags)")
   .option("-p, --prompt <text>", "Prompt to send")
-  .option("--spec <path>", "Spec file path")
+  .option("--spec <path>", "Spec file to include in prompt context")
+  .option(
+    "--file <path>",
+    "File to include in prompt context (repeatable)",
+    collectFile,
+    [] as string[],
+  )
+  .option(
+    "--max-file-size <bytes>",
+    "Max file size in bytes (default: 51200)",
+    Number,
+  )
   .option("--cwd <dir>", "Working directory (default: current directory)")
   .option("--model <model>", "Model to use (e.g. sonnet, opus)")
   .option("--force", "Override directory locks")
@@ -611,6 +623,25 @@ program
     if (!opts.prompt) {
       console.error("Missing required option: -p, --prompt <text>");
       process.exit(1);
+    }
+
+    // --- Build file context (--file and --spec) ---
+    const contextFiles: string[] = [];
+    if (opts.spec) contextFiles.push(opts.spec);
+    if (opts.file?.length) contextFiles.push(...opts.file);
+
+    if (contextFiles.length > 0) {
+      try {
+        const fileContext = await buildFileContext({
+          files: contextFiles,
+          cwd,
+          maxFileSize: opts.maxFileSize,
+        });
+        opts.prompt = prependToPrompt(fileContext, opts.prompt);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
     }
 
     // --- Parallel launch path ---
@@ -768,6 +799,11 @@ program
 
 /** Commander collect callback for repeatable --adapter */
 function collectAdapter(value: string, previous: string[]): string[] {
+  return previous.concat([value]);
+}
+
+/** Commander collect callback for repeatable --file */
+function collectFile(value: string, previous: string[]): string[] {
   return previous.concat([value]);
 }
 
