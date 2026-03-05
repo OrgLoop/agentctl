@@ -140,6 +140,25 @@ function formatDuration(ms: number): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
+/** Parse a duration string like "24h", "7d", "30m" to milliseconds */
+function parseDuration(input: string): number {
+  const match = input.match(/^(\d+)(m|h|d)$/);
+  if (!match)
+    throw new Error(`Invalid duration: ${input} (use e.g. 24h, 7d, 30m)`);
+  const value = Number(match[1]);
+  const unit = match[2];
+  switch (unit) {
+    case "m":
+      return value * 60 * 1000;
+    case "h":
+      return value * 60 * 60 * 1000;
+    case "d":
+      return value * 24 * 60 * 60 * 1000;
+    default:
+      throw new Error(`Unknown duration unit: ${unit}`);
+  }
+}
+
 function printTable(rows: Record<string, string>[]): void {
   if (rows.length === 0) {
     console.log("No sessions found.");
@@ -361,6 +380,62 @@ program
       console.error((err as Error).message);
       process.exit(1);
     }
+  });
+
+// kill
+program
+  .command("kill <id>")
+  .description("Remove a session record (stopped sessions or --force for any)")
+  .option("--force", "Remove session record regardless of state")
+  .action(async (id: string, opts) => {
+    const daemonRunning = await ensureDaemon();
+
+    if (daemonRunning) {
+      try {
+        await client.call("session.kill", {
+          id,
+          force: opts.force,
+        });
+        console.log(`Removed session ${id.slice(0, 8)}`);
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
+    console.error("Daemon not running. Start with: agentctl daemon start");
+    process.exit(1);
+  });
+
+// prune
+program
+  .command("prune")
+  .description("Remove sessions stopped for longer than --max-age")
+  .option(
+    "--max-age <duration>",
+    "Max age before pruning (e.g. 24h, 7d, 30m)",
+    "24h",
+  )
+  .action(async (opts) => {
+    const daemonRunning = await ensureDaemon();
+
+    if (daemonRunning) {
+      try {
+        const maxAgeMs = parseDuration(opts.maxAge);
+        const result = await client.call<{ pruned: number }>("session.prune", {
+          maxAgeMs,
+        });
+        console.log(`Pruned ${result.pruned} session(s)`);
+        return;
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
+    console.error("Daemon not running. Start with: agentctl daemon start");
+    process.exit(1);
   });
 
 // resume

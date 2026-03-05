@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import type { AgentAdapter, AgentSession } from "../core/types.js";
 import type { SessionRecord, StateManager } from "./state.js";
 
@@ -6,6 +7,8 @@ export interface SessionTrackerOpts {
   pollIntervalMs?: number;
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
+  /** Override PID command lookup for testing (default: ps -p <pid> -o command=) */
+  getProcessCommand?: (pid: number) => string | undefined;
 }
 
 export class SessionTracker {
@@ -14,12 +17,14 @@ export class SessionTracker {
   private pollIntervalMs: number;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly getProcessCommand: (pid: number) => string | undefined;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
     this.adapters = opts.adapters;
     this.pollIntervalMs = opts.pollIntervalMs ?? 5000;
     this.isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
+    this.getProcessCommand = opts.getProcessCommand ?? defaultGetProcessCommand;
   }
 
   startPolling(): void {
@@ -94,7 +99,7 @@ export class SessionTracker {
         }
       }
 
-      // Bug 1: If session is "running"/"idle" but PID is dead, mark stopped
+      // Bug 1: If session is "running"/"idle" but PID is dead or reused, mark stopped
       if (
         (record.status === "running" || record.status === "idle") &&
         record.pid
@@ -104,7 +109,7 @@ export class SessionTracker {
         const adapterId = adapterPidToId.get(record.pid);
         if (adapterId === id) continue; // Adapter confirmed this PID is active
 
-        if (!this.isProcessAlive(record.pid)) {
+        if (!this.isPidValid(record)) {
           this.state.setSession(id, {
             ...record,
             status: "stopped",
@@ -152,10 +157,10 @@ export class SessionTracker {
   listSessions(opts?: { status?: string; all?: boolean }): SessionRecord[] {
     const sessions = Object.values(this.state.getSessions());
 
-    // Liveness check: mark sessions with dead PIDs as stopped
+    // Liveness check: mark sessions with dead/reused PIDs as stopped
     for (const s of sessions) {
       if ((s.status === "running" || s.status === "idle") && s.pid) {
-        if (!this.isProcessAlive(s.pid)) {
+        if (!this.isPidValid(s)) {
           s.status = "stopped";
           s.stoppedAt = new Date().toISOString();
           this.state.setSession(s.id, s);
@@ -190,6 +195,67 @@ export class SessionTracker {
     ).length;
   }
 
+  /**
+   * Validate that a PID is alive AND belongs to the expected process.
+   * Detects PID reuse by checking the process command line.
+   */
+  private isPidValid(record: SessionRecord): boolean {
+    if (!record.pid) return false;
+    if (!this.isProcessAlive(record.pid)) return false;
+
+    // Check if the process command matches what we'd expect for this adapter
+    const cmd = this.getProcessCommand(record.pid);
+    if (cmd === undefined) return false; // process disappeared between checks
+
+    // The PID should be running a claude/node/openclaw process, not something unrelated
+    const expectedPatterns = ADAPTER_CMD_PATTERNS[record.adapter];
+    if (!expectedPatterns) return true; // unknown adapter — trust PID check alone
+
+    return expectedPatterns.some((pattern) => cmd.includes(pattern));
+  }
+
+  /**
+   * Kill a session: removes stopped sessions from state, force-kills running ones.
+   * Returns the removed record, or undefined if not found.
+   */
+  killSession(
+    sessionId: string,
+    opts?: { force?: boolean },
+  ): SessionRecord | undefined {
+    const session = this.getSession(sessionId);
+    if (!session) return undefined;
+
+    if (session.status === "stopped" || opts?.force) {
+      this.state.removeSession(session.id);
+      return session;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Prune sessions that have been stopped for longer than maxAgeMs.
+   * Returns the number of sessions pruned.
+   */
+  pruneSessions(maxAgeMs: number): number {
+    const now = Date.now();
+    const sessions = this.state.getSessions();
+    let pruned = 0;
+
+    for (const [id, record] of Object.entries(sessions)) {
+      if (record.status !== "stopped") continue;
+      if (!record.stoppedAt) continue;
+
+      const stoppedAt = new Date(record.stoppedAt).getTime();
+      if (now - stoppedAt > maxAgeMs) {
+        this.state.removeSession(id);
+        pruned++;
+      }
+    }
+
+    return pruned;
+  }
+
   /** Remove a session from state entirely (used for ghost cleanup) */
   removeSession(sessionId: string): void {
     this.state.removeSession(sessionId);
@@ -216,6 +282,24 @@ function defaultIsProcessAlive(pid: number): boolean {
     return false;
   }
 }
+
+/** Get the command line of a running process (macOS/Linux) */
+function defaultGetProcessCommand(pid: number): string | undefined {
+  try {
+    return execSync(`ps -p ${pid} -o command=`, {
+      encoding: "utf-8",
+      timeout: 2000,
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Expected command-line substrings per adapter — used to detect PID reuse */
+const ADAPTER_CMD_PATTERNS: Record<string, string[]> = {
+  "claude-code": ["claude", "node"],
+  openclaw: ["openclaw", "node"],
+};
 
 /**
  * Remove pending-* entries that share a PID with a resolved (non-pending) session.

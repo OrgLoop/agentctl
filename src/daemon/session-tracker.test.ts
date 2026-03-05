@@ -373,6 +373,7 @@ describe("SessionTracker", () => {
       const livePidTracker = new SessionTracker(state, {
         adapters: {},
         isProcessAlive: () => true,
+        getProcessCommand: () => "/usr/local/bin/node /path/to/claude",
       });
 
       livePidTracker.track(
@@ -394,6 +395,183 @@ describe("SessionTracker", () => {
 
       tracker.removeSession("pending-55555");
       expect(state.getSession("pending-55555")).toBeUndefined();
+    });
+  });
+
+  describe("PID reuse detection (issue #93)", () => {
+    it("marks session as stopped when PID is alive but command doesn't match", async () => {
+      // Session was launched as claude-code, but PID now runs something else
+      const reusedTracker = new SessionTracker(state, {
+        adapters: {
+          "claude-code": {
+            id: "claude-code",
+            list: async () => [],
+            peek: async () => "",
+            status: async () => makeSession(),
+            launch: async () => makeSession(),
+            stop: async () => {},
+            resume: async () => {},
+            async *events() {},
+          },
+        },
+        isProcessAlive: () => true, // PID is alive
+        getProcessCommand: () => "/usr/bin/vim /etc/hosts", // but it's not claude
+      });
+
+      reusedTracker.track(
+        makeSession({
+          id: "reused-pid-session",
+          status: "running",
+          pid: 42000,
+        }),
+        "claude-code",
+      );
+
+      reusedTracker.startPolling();
+      await new Promise((r) => setTimeout(r, 100));
+      reusedTracker.stopPolling();
+
+      const session = state.getSession("reused-pid-session");
+      expect(session?.status).toBe("stopped");
+    });
+
+    it("keeps session running when PID is alive and command matches", async () => {
+      const validTracker = new SessionTracker(state, {
+        adapters: {
+          "claude-code": {
+            id: "claude-code",
+            list: async () => [],
+            peek: async () => "",
+            status: async () => makeSession(),
+            launch: async () => makeSession(),
+            stop: async () => {},
+            resume: async () => {},
+            async *events() {},
+          },
+        },
+        isProcessAlive: () => true,
+        getProcessCommand: () => "/usr/local/bin/node /path/to/claude",
+      });
+
+      validTracker.track(
+        makeSession({ id: "valid-pid-session", status: "running", pid: 42001 }),
+        "claude-code",
+      );
+
+      validTracker.startPolling();
+      await new Promise((r) => setTimeout(r, 100));
+      validTracker.stopPolling();
+
+      const session = state.getSession("valid-pid-session");
+      expect(session?.status).toBe("running");
+    });
+
+    it("listSessions detects PID reuse via command mismatch", () => {
+      const reusedTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+        getProcessCommand: () => "/usr/bin/python3 script.py",
+      });
+
+      reusedTracker.track(
+        makeSession({ id: "list-reuse-check", status: "running", pid: 42002 }),
+        "claude-code",
+      );
+
+      const list = reusedTracker.listSessions({ all: true });
+      const session = list.find((s) => s.id === "list-reuse-check");
+      expect(session?.status).toBe("stopped");
+    });
+  });
+
+  describe("killSession (issue #93)", () => {
+    it("removes a stopped session from state", () => {
+      tracker.track(
+        makeSession({ id: "stopped-1", status: "stopped" }),
+        "claude-code",
+      );
+
+      const removed = tracker.killSession("stopped-1");
+      expect(removed).toBeDefined();
+      expect(removed?.id).toBe("stopped-1");
+      expect(state.getSession("stopped-1")).toBeUndefined();
+    });
+
+    it("does not remove a running session without force", () => {
+      tracker.track(
+        makeSession({ id: "running-1", status: "running" }),
+        "claude-code",
+      );
+
+      const removed = tracker.killSession("running-1");
+      expect(removed).toBeUndefined();
+      expect(state.getSession("running-1")).toBeDefined();
+    });
+
+    it("force-removes a running session", () => {
+      tracker.track(
+        makeSession({ id: "running-2", status: "running" }),
+        "claude-code",
+      );
+
+      const removed = tracker.killSession("running-2", { force: true });
+      expect(removed).toBeDefined();
+      expect(removed?.id).toBe("running-2");
+      expect(state.getSession("running-2")).toBeUndefined();
+    });
+
+    it("returns undefined for unknown session", () => {
+      expect(tracker.killSession("nonexistent")).toBeUndefined();
+    });
+  });
+
+  describe("pruneSessions (issue #93)", () => {
+    it("prunes sessions stopped longer than maxAge", () => {
+      // Stopped 48h ago
+      const oldDate = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+      state.setSession("old-session", {
+        id: "old-session",
+        adapter: "claude-code",
+        status: "stopped",
+        startedAt: oldDate,
+        stoppedAt: oldDate,
+        meta: {},
+      });
+
+      // Stopped 1h ago
+      const recentDate = new Date(
+        Date.now() - 1 * 60 * 60 * 1000,
+      ).toISOString();
+      state.setSession("recent-session", {
+        id: "recent-session",
+        adapter: "claude-code",
+        status: "stopped",
+        startedAt: recentDate,
+        stoppedAt: recentDate,
+        meta: {},
+      });
+
+      const pruned = tracker.pruneSessions(24 * 60 * 60 * 1000); // 24h
+
+      expect(pruned).toBe(1);
+      expect(state.getSession("old-session")).toBeUndefined();
+      expect(state.getSession("recent-session")).toBeDefined();
+    });
+
+    it("does not prune running sessions", () => {
+      tracker.track(
+        makeSession({ id: "active-1", status: "running" }),
+        "claude-code",
+      );
+
+      const pruned = tracker.pruneSessions(0); // age 0 = prune everything stopped
+      expect(pruned).toBe(0);
+      expect(state.getSession("active-1")).toBeDefined();
+    });
+
+    it("returns 0 when no sessions to prune", () => {
+      const pruned = tracker.pruneSessions(24 * 60 * 60 * 1000);
+      expect(pruned).toBe(0);
     });
   });
 });

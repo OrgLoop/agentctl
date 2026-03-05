@@ -329,6 +329,36 @@ function createRequestHandler(ctx: HandlerContext) {
         return null;
       }
 
+      case "session.kill": {
+        const session = ctx.sessionTracker.getSession(params.id as string);
+        if (!session) throw new Error(`Session not found: ${params.id}`);
+
+        const force = params.force as boolean | undefined;
+
+        // For running sessions without --force, try to stop via adapter first
+        if (
+          (session.status === "running" || session.status === "idle") &&
+          !force
+        ) {
+          throw new Error(
+            `Session ${session.id.slice(0, 8)} is still ${session.status}. Use --force to remove it.`,
+          );
+        }
+
+        // Clean up locks
+        ctx.lockManager.autoUnlock(session.id);
+
+        // Remove from state
+        ctx.sessionTracker.killSession(session.id, { force: true });
+        return null;
+      }
+
+      case "session.prune": {
+        const maxAgeMs = (params.maxAgeMs as number) || 24 * 60 * 60 * 1000;
+        const pruned = ctx.sessionTracker.pruneSessions(maxAgeMs);
+        return { pruned };
+      }
+
       case "lock.list":
         return ctx.lockManager.listAll();
 
