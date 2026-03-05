@@ -252,7 +252,9 @@ export class CodexAdapter implements AgentAdapter {
 
     const cwd = opts.cwd || process.cwd();
     args.push("--cd", cwd);
-    args.push(opts.prompt);
+    // Use -- separator to prevent prompts starting with dashes from being
+    // interpreted as CLI options by the downstream arg parser.
+    args.push("--", opts.prompt);
 
     const env = buildSpawnEnv(undefined, opts.env);
 

@@ -301,7 +301,9 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (opts.model) {
       args.push("--model", opts.model);
     }
-    args.push(opts.prompt);
+    // Use -- separator to prevent prompts starting with dashes from being
+    // interpreted as CLI options by the downstream arg parser.
+    args.push("--", opts.prompt);
 
     const env = buildSpawnEnv(undefined, opts.env);
     const cwd = opts.cwd || process.cwd();

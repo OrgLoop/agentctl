@@ -328,7 +328,9 @@ export class PiRustAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = ["--print", "--mode", "json", opts.prompt];
+    // Use -- separator to prevent prompts starting with dashes from being
+    // interpreted as CLI options by the downstream arg parser.
+    const args = ["--print", "--mode", "json", "--", opts.prompt];
 
     if (opts.model) {
       const { provider, model } = parseProviderModel(

@@ -179,4 +179,24 @@ describe("PiRustAdapter launch", () => {
     expect(args).toContain("--provider");
     expect(args).toContain("openrouter");
   });
+
+  it("uses -- separator so dash-prefixed prompts are not parsed as options", async () => {
+    const dashPrompt = "---\ntitle: spec\n---\nFix the bug";
+    await adapter.launch({
+      adapter: "pi-rust",
+      prompt: dashPrompt,
+      cwd: tmpDir,
+    });
+
+    expect(spawnCalls).toHaveLength(1);
+    const args = spawnCalls[0].args;
+    // -- must appear before the prompt
+    const sepIdx = args.indexOf("--");
+    const promptIdx = args.indexOf(dashPrompt);
+    expect(sepIdx).toBeGreaterThanOrEqual(0);
+    expect(promptIdx).toBe(sepIdx + 1);
+    // prompt should be the last arg, after --
+    expect(args[args.length - 1]).toBe(dashPrompt);
+    expect(args[args.length - 2]).toBe("--");
+  });
 });
