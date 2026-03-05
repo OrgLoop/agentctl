@@ -363,6 +363,52 @@ program
     }
   });
 
+// kill
+program
+  .command("kill <id>")
+  .description("Remove a session record from the store")
+  .option("--force", "Force remove regardless of state (SIGKILL if running)")
+  .action(async (id: string, opts) => {
+    const daemonRunning = await ensureDaemon();
+    if (!daemonRunning) {
+      console.error("Daemon not running");
+      process.exit(1);
+    }
+    try {
+      await client.call("session.kill", { id, force: opts.force });
+      console.log(`Removed session ${id.slice(0, 8)}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// prune
+program
+  .command("prune")
+  .description("Remove stale stopped sessions")
+  .option(
+    "--max-age <hours>",
+    "Remove sessions stopped more than N hours ago",
+    "24",
+  )
+  .action(async (opts) => {
+    const daemonRunning = await ensureDaemon();
+    if (!daemonRunning) {
+      console.error("Daemon not running");
+      process.exit(1);
+    }
+    try {
+      const result = await client.call<{ pruned: number }>("session.prune", {
+        maxAgeHours: Number(opts.maxAge),
+      });
+      console.log(`Pruned ${result.pruned} stale session(s)`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
 // resume
 program
   .command("resume <id> <message>")
