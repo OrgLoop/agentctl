@@ -71,6 +71,12 @@ agentctl launch pi -p "Refactor the auth module"
 # Stop a session
 agentctl stop <session-id>
 
+# Kill a ghost session (remove from daemon state, SIGKILL if still running)
+agentctl kill <session-id> --force
+
+# Prune stale stopped sessions older than N hours (default: 24)
+agentctl prune --max-age 12
+
 # Resume a stopped session with a new message
 agentctl resume <session-id> "fix the failing tests"
 ```
@@ -177,6 +183,12 @@ When `--cwd` is omitted, the agent launches in the current working directory (`$
 agentctl stop <id> [options]
   --force              Force kill (SIGINT then SIGKILL)
   --adapter <name>     Adapter to use
+
+agentctl kill <id> [options]
+  --force              Force remove regardless of state (SIGKILL if running)
+
+agentctl prune [options]
+  --max-age <hours>    Remove sessions stopped more than N hours ago (default: 24)
 
 agentctl resume <id> <message> [options]
   --adapter <name>     Adapter to use
