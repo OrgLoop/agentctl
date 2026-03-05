@@ -67,3 +67,20 @@ Bumps version, builds, tags, and runs `npm link`. No npm publish (local tool).
 ## CI
 
 GitHub Actions runs on push/PR to main: install → lint → typecheck → build → test.
+
+## Quality Gate — MANDATORY Before Declaring Done
+
+**The work is not done until ALL of these pass:**
+
+1. `npm run typecheck` — zero errors
+2. `npm run lint` — zero errors (use `lint:fix` first)
+3. `npm run build` — succeeds
+4. `npm test` — all tests pass
+5. **New logic requires new tests.** If you added or changed a function, write a test for it.
+6. **If you can't make tests pass, say so explicitly.** Do not silently skip failing tests.
+
+### Anti-Patterns — DO NOT:
+- ❌ Commit without running the full verify suite (typecheck + lint + build + test)
+- ❌ Skip writing tests for new functionality
+- ❌ Declare "done" when tests are failing
+- ❌ Assume the code works because it compiles
