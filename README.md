@@ -1,8 +1,8 @@
 # agentctl
 
-Universal agent supervision interface. Monitor and control AI coding agents from a single CLI.
+Universal interface for supervising coding agents. Launch, monitor, resume, interrupt, and compare sessions across adapters from one CLI.
 
-agentctl reads from native sources (Claude Code's `~/.claude/` directory, Pi's `~/.pi/` directory, running processes) and provides a standard interface to list, inspect, stop, launch, and resume agent sessions. It never replicates state — it reads what's actually happening.
+agentctl reads from native sources (Claude Code's `~/.claude/` directory, Pi's `~/.pi/` directory, running processes) and provides a standard control plane to list, inspect, stop, launch, and resume agent sessions. It never replicates state — it reads what's actually happening.
 
 ## Layer Model
 
@@ -19,11 +19,24 @@ agentctl intentionally does **not**:
 
 ## Why agentctl?
 
-You can use `claude code` (or any agent CLI) directly — agentctl is not a replacement. It's a supervisory layer for people and agents managing multiple concurrent coding sessions.
+You can use `claude code` (or any agent CLI) directly — agentctl is not a replacement. It's the supervision layer you reach for once you're running enough agent sessions that you need one interface to operate them reliably.
 
-What it adds: session discovery across all running Claude Code instances, lifecycle tracking that persists session info even after processes exit, a daemon with directory locks to prevent duplicate launches on the same working directory, fuse timers for automated resource cleanup, and a standard interface that works the same regardless of which coding agent is underneath. The adapter model means support for additional agent runtimes (Codex, Aider, etc.) can be added without changing the CLI or daemon interface.
+The practical value is simple: launch work, see what's running, resume interrupted sessions, stop the ones that went sideways, and compare outcomes across adapters without learning a different control surface for each one. That operator UX matters whether the supervisor is a human juggling multiple sessions or another agent coordinating work on your behalf.
 
-Over time, agentctl can extend to handle more concerns of headless coding — automating worktree bootstrap/teardown, running N parallel implementations across different adapters and models and judging who did it best, and other patterns that emerge as AI-assisted development matures.
+What it adds today: session discovery across running agents, lifecycle tracking that persists session info even after processes exit, a daemon with directory locks to prevent duplicate launches on the same working directory, fuse timers for automated resource cleanup, and a standard interface that works the same regardless of which coding agent is underneath. The adapter model means support for additional agent runtimes can be added without changing the CLI or daemon interface.
+
+The bigger idea is modest but useful: agentctl is a universal control plane for coding agents. It focuses on the operational layer — launch, monitor, resume, interrupt, compare — while leaving native execution to each adapter and higher-level judgment to systems above it.
+
+## Positioning
+
+agentctl is for the operational layer of AI coding work.
+
+- **Universal interface**: one CLI across Claude Code, Codex, OpenCode, Pi, and other adapters
+- **Supervision surface**: inspect live work, resume stalled sessions, interrupt bad runs, and monitor progress
+- **Comparison workflow**: run the same task across adapters or models in isolated worktrees
+- **Ground-truth state**: read native agent sources instead of maintaining a parallel registry
+
+It is intentionally not the reasoning layer and not the event router. agentctl is the control plane; other systems can decide what should happen and react to the events it emits.
 
 ## Installation
 
@@ -66,7 +79,7 @@ Session IDs support prefix matching — `agentctl peek abc123` (or `agentctl log
 
 ### Parallel Multi-Adapter Launch
 
-Launch the same prompt across multiple adapters (or the same adapter with different models). Each gets its own git worktree and runs in isolation:
+Launch the same prompt across multiple adapters (or the same adapter with different models). Each gets its own git worktree and runs in isolation, which makes side-by-side comparison a normal workflow instead of a special-case experiment:
 
 ```bash
 # Launch across 3 adapters
@@ -217,7 +230,7 @@ agentctl worktree clean ~/code/mono-try-g-a1b2c3-cc --delete-branch
 
 ### Lifecycle Hooks
 
-Hooks are shell commands that run at specific points in a session's lifecycle. Pass them as flags to `launch`:
+Hooks are shell commands that run at specific points in a session's lifecycle. They let you make sessions operationally complete — bootstrap the environment before launch, then test or notify the moment work finishes. Pass them as flags to `launch`:
 
 ```bash
 agentctl launch -p "implement feature X" \
@@ -275,7 +288,7 @@ Directory             Cluster                     Expires In
 
 ### Daemon
 
-The daemon provides session tracking, directory locks, fuse timers, and Prometheus metrics. It auto-starts on first `agentctl` command.
+The daemon provides session tracking, directory locks, fuse timers, and Prometheus metrics. In practice, it's what makes agentctl feel like a reliable supervision surface instead of a thin command wrapper. It auto-starts on first `agentctl` command.
 
 ```bash
 agentctl daemon start [options]
@@ -363,9 +376,9 @@ scrape_configs:
 
 ## Architecture
 
-agentctl is structured in three layers: the **CLI** parses commands and formats output, the **daemon** provides persistent state (session tracking, directory locks, fuse timers, Prometheus metrics), and **adapters** bridge to specific agent runtimes. The CLI communicates with the daemon over a Unix socket at `~/.agentctl/agentctl.sock`.
+agentctl is structured in three layers: the **CLI** is the operator interface, the **daemon** provides persistent supervision state (session tracking, directory locks, fuse timers, Prometheus metrics), and **adapters** bridge to specific agent runtimes. The CLI communicates with the daemon over a Unix socket at `~/.agentctl/agentctl.sock`.
 
-All session state is derived from native sources — agentctl never maintains its own session registry. The Claude Code adapter reads `~/.claude/projects/` and cross-references running processes; the Pi adapter reads `~/.pi/agent/sessions/` JSONL files; other adapters connect to their respective APIs. This means agentctl always reflects ground truth.
+All session state is derived from native sources — agentctl never maintains its own session registry. The Claude Code adapter reads `~/.claude/projects/` and cross-references running processes; the Pi adapter reads `~/.pi/agent/sessions/` JSONL files; other adapters connect to their respective APIs. This keeps agentctl grounded in what is actually running, not a shadow copy that drifts out of date.
 
 ## Adapters
 
