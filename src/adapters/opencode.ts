@@ -357,7 +357,9 @@ export class OpenCodeAdapter implements AgentAdapter {
       promptFilePath = await writePromptFile(opts.prompt);
       promptFd = await openPromptFd(promptFilePath);
     } else {
-      args.push(opts.prompt);
+      // Use -- separator to prevent prompts starting with dashes (e.g. YAML
+      // frontmatter "---") from being interpreted as CLI options by opencode.
+      args.push("--", opts.prompt);
     }
 
     const env = buildSpawnEnv(undefined, opts.env);
