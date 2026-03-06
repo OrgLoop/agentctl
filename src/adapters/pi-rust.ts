@@ -342,7 +342,9 @@ export class PiRustAdapter implements AgentAdapter {
 
     const args = useTempFile
       ? ["--print", "--mode", "json"]
-      : ["--print", "--mode", "json", opts.prompt];
+      // Use -- separator to prevent prompts starting with dashes from being
+      // interpreted as CLI options by pi-rust.
+      : ["--print", "--mode", "json", "--", opts.prompt];
 
     if (useTempFile) {
       promptFilePath = await writePromptFile(opts.prompt);

@@ -74,7 +74,7 @@ describe("OpenCodeAdapter launch", () => {
     const modelIdx = args.indexOf("--model");
     const promptIdx = args.indexOf("fix the bug");
     expect(modelIdx).toBeLessThan(promptIdx);
-    expect(args).toEqual(["run", "--model", "deepseek-r1", "fix the bug"]);
+    expect(args).toEqual(["run", "--model", "deepseek-r1", "--", "fix the bug"]);
   });
 
   it("omits --model flag when opts.model is not set", async () => {
@@ -87,6 +87,22 @@ describe("OpenCodeAdapter launch", () => {
     expect(spawnCalls).toHaveLength(1);
     const args = spawnCalls[0].args;
     expect(args).not.toContain("--model");
-    expect(args).toEqual(["run", "fix the bug"]);
+    expect(args).toEqual(["run", "--", "fix the bug"]);
+  });
+
+  it("inserts -- before prompts that start with dashes (e.g. YAML frontmatter)", async () => {
+    const dashPrompt = "---\ntitle: My Spec\n---\nBuild this.";
+    await adapter.launch({
+      adapter: "opencode",
+      prompt: dashPrompt,
+      cwd: tmpDir,
+    });
+
+    expect(spawnCalls).toHaveLength(1);
+    const args = spawnCalls[0].args;
+    // -- must appear immediately before the prompt positional
+    const separatorIdx = args.indexOf("--");
+    expect(separatorIdx).toBeGreaterThan(-1);
+    expect(args[separatorIdx + 1]).toBe(dashPrompt);
   });
 });
