@@ -74,7 +74,13 @@ describe("OpenCodeAdapter launch", () => {
     const modelIdx = args.indexOf("--model");
     const promptIdx = args.indexOf("fix the bug");
     expect(modelIdx).toBeLessThan(promptIdx);
-    expect(args).toEqual(["run", "--model", "deepseek-r1", "--", "fix the bug"]);
+    expect(args).toEqual([
+      "run",
+      "--model",
+      "deepseek-r1",
+      "--",
+      "fix the bug",
+    ]);
   });
 
   it("omits --model flag when opts.model is not set", async () => {
