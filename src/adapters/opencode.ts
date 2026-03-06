@@ -276,30 +276,69 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     const messages = await this.readMessages(resolved.id);
 
+    // Filter to assistant messages first, then take only the last N
+    // before reading parts — avoids O(M*P) file reads for long sessions
+    const assistantMsgs = messages.filter((m) => m.role === "assistant");
+    const recentMsgs = assistantMsgs.slice(-lines);
+
     const assistantMessages: string[] = [];
-    for (const msg of messages) {
-      if (msg.role === "assistant") {
-        // Read message content parts
-        const text = await this.readMessageParts(msg.id);
-        if (text) {
-          assistantMessages.push(text);
-        } else if (msg.error?.data?.message) {
-          assistantMessages.push(`[error] ${msg.error.data.message}`);
-        }
+    for (const msg of recentMsgs) {
+      const text = await this.readMessageParts(msg.id);
+      if (text) {
+        assistantMessages.push(text);
+      } else if (msg.error?.data?.message) {
+        assistantMessages.push(`[error] ${msg.error.data.message}`);
       }
     }
 
-    // Take last N messages
-    const recent = assistantMessages.slice(-lines);
-    return recent.join("\n---\n");
+    return assistantMessages.join("\n---\n");
   }
 
   async status(sessionId: string): Promise<AgentSession> {
-    const runningPids = await this.getPids();
     const resolved = await this.resolveSessionId(sessionId);
     if (!resolved) throw new Error(`Session not found: ${sessionId}`);
 
-    return this.buildSession(resolved, runningPids);
+    // Lightweight status: avoid expensive getOpenCodePids() (ps aux + lsof per process).
+    // Instead, check persisted metadata PID and recent-update heuristic.
+    const isRunning = await this.isSessionRunningLightweight(resolved);
+    const { model, tokens, cost } = await this.aggregateMessageStats(
+      resolved.id,
+    );
+
+    const createdAt = resolved.time?.created
+      ? new Date(resolved.time.created)
+      : new Date();
+    const updatedAt = resolved.time?.updated
+      ? new Date(resolved.time.updated)
+      : undefined;
+
+    let pid: number | undefined;
+    if (isRunning) {
+      const meta = await this.readSessionMeta(resolved.id);
+      if (meta?.pid && this.isProcessAlive(meta.pid)) {
+        pid = meta.pid;
+      }
+    }
+
+    return {
+      id: resolved.id,
+      adapter: this.id,
+      status: isRunning ? "running" : "stopped",
+      startedAt: createdAt,
+      stoppedAt: isRunning ? undefined : updatedAt,
+      cwd: resolved.directory,
+      model,
+      prompt: resolved.title?.slice(0, 200),
+      tokens,
+      cost,
+      pid,
+      meta: {
+        projectID: resolved.projectID,
+        slug: resolved.slug,
+        summary: resolved.summary,
+        version: resolved.version,
+      },
+    };
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
@@ -643,6 +682,31 @@ export class OpenCodeAdapter implements AgentAdapter {
             return true;
           }
         }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Lightweight aliveness check for single-session queries (status/peek).
+   * Avoids the expensive getOpenCodePids() call (ps aux + lsof per process)
+   * by using persisted metadata and recency heuristics.
+   */
+  private async isSessionRunningLightweight(
+    sessionData: OpenCodeSessionFile,
+  ): Promise<boolean> {
+    // 1. Check persisted session metadata (for sessions launched via agentctl)
+    const meta = await this.readSessionMeta(sessionData.id);
+    if (meta?.pid && this.isProcessAlive(meta.pid)) {
+      return true;
+    }
+
+    // 2. Heuristic: session updated very recently → likely still running
+    if (sessionData.time?.updated) {
+      const updatedMs = new Date(sessionData.time.updated).getTime();
+      if (!Number.isNaN(updatedMs) && Date.now() - updatedMs < 60_000) {
+        return true;
       }
     }
 
