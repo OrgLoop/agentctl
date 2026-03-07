@@ -362,7 +362,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       args.push("--", opts.prompt);
     }
 
-    const env = buildSpawnEnv(undefined, opts.env);
+    const env = buildSpawnEnv(opts.env);
     const cwd = opts.cwd || process.cwd();
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });

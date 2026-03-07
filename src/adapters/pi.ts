@@ -348,7 +348,7 @@ export class PiAdapter implements AgentAdapter {
       args.unshift("--model", opts.model);
     }
 
-    const env = buildSpawnEnv(undefined, opts.env);
+    const env = buildSpawnEnv(opts.env);
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID

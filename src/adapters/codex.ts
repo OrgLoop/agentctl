@@ -274,7 +274,7 @@ export class CodexAdapter implements AgentAdapter {
       args.push("--", opts.prompt);
     }
 
-    const env = buildSpawnEnv(undefined, opts.env);
+    const env = buildSpawnEnv(opts.env);
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);

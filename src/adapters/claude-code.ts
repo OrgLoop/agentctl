@@ -470,7 +470,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       args.push("-p", opts.prompt);
     }
 
-    const env = buildSpawnEnv(undefined, opts.env);
+    const env = buildSpawnEnv(opts.env);
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID
