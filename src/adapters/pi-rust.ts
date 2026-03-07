@@ -370,7 +370,7 @@ export class PiRustAdapter implements AgentAdapter {
       args.unshift("--append-system-prompt", text);
     }
 
-    const env = buildSpawnEnv(undefined, opts.env);
+    const env = buildSpawnEnv(opts.env);
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID

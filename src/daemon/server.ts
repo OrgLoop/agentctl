@@ -14,7 +14,7 @@ import { PiAdapter } from "../adapters/pi.js";
 import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
 import { migrateLocks } from "../migration/migrate-locks.js";
-import { saveEnvironment } from "../utils/daemon-env.js";
+
 import { clearBinaryCache } from "../utils/resolve-binary.js";
 import { FuseEngine } from "./fuse-engine.js";
 import { LockManager } from "./lock-manager.js";
@@ -77,21 +77,18 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   // 3. Clean stale socket file
   await fs.rm(sockPath, { force: true });
 
-  // 4. Save shell environment for subprocess spawning (#42)
-  await saveEnvironment(configDir);
-
-  // 5. Clear binary cache on restart (#41 — pick up moved/updated binaries)
+  // 4. Clear binary cache on restart (#41 — pick up moved/updated binaries)
   clearBinaryCache();
 
-  // 6. Run migration (idempotent)
+  // 5. Run migration (idempotent)
   await migrateLocks(configDir).catch((err) =>
     console.error("Migration warning:", err.message),
   );
 
-  // 7. Load persisted state
+  // 6. Load persisted state
   const state = await StateManager.load(configDir);
 
-  // 8. Initialize subsystems
+  // 7. Initialize subsystems
   const adapters: Record<string, AgentAdapter> = opts.adapters || {
     "claude-code": new ClaudeCodeAdapter(),
     codex: new CodexAdapter(),
@@ -115,7 +112,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     metrics.recordFuseExpired();
   });
 
-  // 9. Initial PID liveness cleanup for daemon-launched sessions
+  // 8. Initial PID liveness cleanup for daemon-launched sessions
   //    (replaces the old validateAllSessions — much simpler, only checks launches)
   const initialDead = sessionTracker.cleanupDeadLaunches();
   if (initialDead.length > 0) {
@@ -125,15 +122,15 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     );
   }
 
-  // 10. Resume fuse timers
+  // 9. Resume fuse timers
   fuseEngine.resumeTimers();
 
-  // 11. Start periodic PID liveness check for lock cleanup (30s interval)
+  // 10. Start periodic PID liveness check for lock cleanup (30s interval)
   sessionTracker.startLaunchCleanup((deadId) => {
     lockManager.autoUnlock(deadId);
   });
 
-  // 12. Create request handler
+  // 11. Create request handler
   const handleRequest = createRequestHandler({
     sessionTracker,
     lockManager,
@@ -145,7 +142,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     sockPath,
   });
 
-  // 13. Start Unix socket server
+  // 12. Start Unix socket server
   const socketServer = net.createServer((conn) => {
     let buffer = "";
     conn.on("data", (chunk) => {
@@ -184,10 +181,10 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     socketServer.on("error", reject);
   });
 
-  // 14. Write PID file (after socket is listening — acts as "lock acquired")
+  // 13. Write PID file (after socket is listening — acts as "lock acquired")
   await fs.writeFile(pidFilePath, String(process.pid));
 
-  // 15. Start HTTP metrics server
+  // 14. Start HTTP metrics server
   const metricsPort = opts.metricsPort ?? 9200;
   const httpServer = http.createServer((req, res) => {
     if (req.url === "/metrics" && req.method === "GET") {
@@ -218,7 +215,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     await fs.rm(pidFilePath, { force: true });
   };
 
-  // 16. Signal handlers
+  // 15. Signal handlers
   for (const sig of ["SIGTERM", "SIGINT"] as const) {
     process.on(sig, async () => {
       console.log(`Received ${sig}, shutting down...`);

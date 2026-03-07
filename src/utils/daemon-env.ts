@@ -1,14 +1,12 @@
-import * as fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
-
-const ENV_FILE = "daemon-env.json";
 
 /**
  * Common bin directories that should be in PATH when spawning subprocesses.
  * These cover the usual locations for various package managers and tools.
  */
-function getCommonBinDirs(): string[] {
+export function getCommonBinDirs(): string[] {
   const home = os.homedir();
   return [
     path.join(home, ".local", "bin"),
@@ -25,53 +23,46 @@ function getCommonBinDirs(): string[] {
 }
 
 /**
- * Save the current process environment to disk.
- * Called at daemon start time when we still have the user's shell env.
+ * Source ~/.zshenv (or other shell init) and capture the resulting environment.
+ * Returns undefined if the file doesn't exist or sourcing fails.
  */
-export async function saveEnvironment(configDir: string): Promise<void> {
-  const envPath = path.join(configDir, ENV_FILE);
+function sourceZshEnv(): Record<string, string> | undefined {
+  const zshenv = path.join(os.homedir(), ".zshenv");
   try {
-    const tmpPath = `${envPath}.tmp`;
-    await fs.writeFile(tmpPath, JSON.stringify(process.env));
-    await fs.rename(tmpPath, envPath);
-  } catch (err) {
-    console.error(
-      `Warning: could not save environment: ${(err as Error).message}`,
+    const output = execFileSync(
+      "/bin/zsh",
+      ["-c", `source "${zshenv}" 2>/dev/null; env -0`],
+      {
+        encoding: "utf-8",
+        timeout: 5000,
+        env: { HOME: os.homedir(), PATH: "/usr/bin:/bin" },
+      },
     );
-  }
-}
-
-/**
- * Load the saved environment from disk.
- * Returns undefined if the env file doesn't exist or is corrupt.
- */
-export async function loadSavedEnvironment(
-  configDir: string,
-): Promise<Record<string, string> | undefined> {
-  const envPath = path.join(configDir, ENV_FILE);
-  try {
-    const raw = await fs.readFile(envPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (typeof parsed === "object" && parsed !== null) {
-      return parsed as Record<string, string>;
+    const env: Record<string, string> = {};
+    for (const entry of output.split("\0")) {
+      if (!entry) continue;
+      const idx = entry.indexOf("=");
+      if (idx > 0) {
+        env[entry.slice(0, idx)] = entry.slice(idx + 1);
+      }
     }
+    return Object.keys(env).length > 0 ? env : undefined;
   } catch {
-    // File doesn't exist or is corrupt
+    return undefined;
   }
-  return undefined;
 }
 
 /**
  * Build an augmented environment for spawning subprocesses.
- * Merges the saved daemon env with common bin paths to ensure
- * binaries are findable even when the daemon is detached from the shell.
+ * Sources ~/.zshenv at call time to get fresh env vars, then augments
+ * PATH with common bin directories. Falls back to process.env if
+ * sourcing fails.
  */
 export function buildSpawnEnv(
-  savedEnv?: Record<string, string>,
   extraEnv?: Record<string, string>,
 ): Record<string, string> {
   const base: Record<string, string> = {};
-  const source = savedEnv || (process.env as Record<string, string>);
+  const source = sourceZshEnv() || (process.env as Record<string, string>);
 
   // Copy source env
   for (const [k, v] of Object.entries(source)) {
