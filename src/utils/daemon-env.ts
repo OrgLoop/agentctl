@@ -54,17 +54,20 @@ function sourceZshEnv(): Record<string, string> | undefined {
 
 /**
  * Build an augmented environment for spawning subprocesses.
- * Sources ~/.zshenv at call time to get fresh env vars, then augments
- * PATH with common bin directories. Falls back to process.env if
- * sourcing fails.
+ * Starts with process.env, overlays ~/.zshenv at call time when available,
+ * then augments PATH with common bin directories.
  */
 export function buildSpawnEnv(
   extraEnv?: Record<string, string>,
 ): Record<string, string> {
   const base: Record<string, string> = {};
-  const source = sourceZshEnv() || (process.env as Record<string, string>);
+  const zshEnv = sourceZshEnv();
+  const source = {
+    ...(process.env as Record<string, string | undefined>),
+    ...(zshEnv ?? {}),
+  };
 
-  // Copy source env
+  // Copy merged env
   for (const [k, v] of Object.entries(source)) {
     if (v !== undefined) base[k] = v;
   }

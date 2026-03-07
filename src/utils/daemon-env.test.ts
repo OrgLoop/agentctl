@@ -45,6 +45,28 @@ describe("buildSpawnEnv", () => {
     expect(env.PATH).toContain("/opt/homebrew/bin");
   });
 
+  it("preserves process.env-only vars when ~/.zshenv sourcing succeeds", () => {
+    const processOnlyKey = "AGENTCTL_PROCESS_ONLY_TEST_VAR";
+    const previous = process.env[processOnlyKey];
+    process.env[processOnlyKey] = "from-process";
+    mockedExecFileSync.mockReturnValue(
+      `HOME=/Users/test\0PATH=/usr/bin:/bin\0`,
+    );
+
+    try {
+      const env = buildSpawnEnv();
+
+      expect(env[processOnlyKey]).toBe("from-process");
+      expect(env.HOME).toBe("/Users/test");
+    } finally {
+      if (previous === undefined) {
+        delete process.env[processOnlyKey];
+      } else {
+        process.env[processOnlyKey] = previous;
+      }
+    }
+  });
+
   it("falls back to process.env when sourcing fails", () => {
     mockedExecFileSync.mockImplementation(() => {
       throw new Error("zsh not found");
