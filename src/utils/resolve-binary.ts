@@ -41,11 +41,12 @@ export async function resolveBinaryPath(
   for (const c of candidates) {
     try {
       await fs.access(c, fs.constants.X_OK);
-      // Resolve symlinks to get the actual binary path
-      const resolved = await fs.realpath(c);
-      await fs.access(resolved, fs.constants.X_OK);
-      resolvedCache.set(name, resolved);
-      return resolved;
+      // Don't resolve symlinks — spawn the symlink path directly and let
+      // the OS resolve it. This avoids stale cache entries when binaries
+      // are upgraded (e.g., Claude Code version bumps update the symlink
+      // target but the daemon's cached realpath points to the old version).
+      resolvedCache.set(name, c);
+      return c;
     } catch {
       // Try next
     }
