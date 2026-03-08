@@ -23,6 +23,7 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -280,16 +281,11 @@ export class CodexAdapter implements AgentAdapter {
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const codexPath = await resolveBinaryPath("codex");
-    const child = spawn(codexPath, args, {
+    const child = await spawnWithRetry("codex", args, {
       cwd,
       env,
       stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, "ignore"],
       detached: true,
-    });
-
-    child.on("error", (err) => {
-      console.error(`[codex] spawn error: ${err.message}`);
     });
 
     child.unref();
