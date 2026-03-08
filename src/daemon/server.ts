@@ -15,12 +15,20 @@ import { PiRustAdapter } from "../adapters/pi-rust.js";
 import type { AgentAdapter } from "../core/types.js";
 import { migrateLocks } from "../migration/migrate-locks.js";
 
+import { loadConfig } from "../utils/config.js";
 import { clearBinaryCache } from "../utils/resolve-binary.js";
 import { FuseEngine } from "./fuse-engine.js";
 import { LockManager } from "./lock-manager.js";
 import { MetricsRegistry } from "./metrics.js";
 import { SessionTracker } from "./session-tracker.js";
+import type { SessionRecord } from "./state.js";
 import { StateManager } from "./state.js";
+import {
+  buildWebhookPayload,
+  emitWebhook,
+  resolveWebhookConfig,
+  type WebhookConfig,
+} from "./webhook.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -98,6 +106,10 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     "pi-rust": new PiRustAdapter(),
   };
 
+  // 7a. Resolve webhook config from config file + env
+  const config = await loadConfig(path.join(configDir, "config.json"));
+  const webhookConfig = resolveWebhookConfig(config);
+
   const lockManager = new LockManager(state);
   const emitter = new EventEmitter();
   const fuseEngine = new FuseEngine(state, {
@@ -112,11 +124,22 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     metrics.recordFuseExpired();
   });
 
+  // Helper: emit webhook for a stopped session (fire-and-forget)
+  const emitSessionStoppedWebhook = (record: SessionRecord) => {
+    if (!webhookConfig) return;
+    const payload = buildWebhookPayload(record);
+    emitWebhook(webhookConfig, payload);
+  };
+
   // 8. Initial PID liveness cleanup for daemon-launched sessions
   //    (replaces the old validateAllSessions — much simpler, only checks launches)
   const initialDead = sessionTracker.cleanupDeadLaunches();
   if (initialDead.length > 0) {
-    for (const id of initialDead) lockManager.autoUnlock(id);
+    for (const id of initialDead) {
+      lockManager.autoUnlock(id);
+      const rec = state.getSession(id);
+      if (rec) emitSessionStoppedWebhook(rec);
+    }
     console.error(
       `Startup cleanup: marked ${initialDead.length} dead launches as stopped`,
     );
@@ -128,6 +151,8 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   // 10. Start periodic PID liveness check for lock cleanup (30s interval)
   sessionTracker.startLaunchCleanup((deadId) => {
     lockManager.autoUnlock(deadId);
+    const rec = state.getSession(deadId);
+    if (rec) emitSessionStoppedWebhook(rec);
   });
 
   // 11. Create request handler
@@ -140,6 +165,8 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     state,
     configDir,
     sockPath,
+    webhookConfig,
+    emitSessionStoppedWebhook,
   });
 
   // 12. Start Unix socket server
@@ -322,6 +349,8 @@ interface HandlerContext {
   state: StateManager;
   configDir: string;
   sockPath: string;
+  webhookConfig: WebhookConfig | null;
+  emitSessionStoppedWebhook: (record: SessionRecord) => void;
 }
 
 function createRequestHandler(ctx: HandlerContext) {
@@ -378,9 +407,11 @@ function createRequestHandler(ctx: HandlerContext) {
         const { sessions: allSessions, stoppedLaunchIds } =
           ctx.sessionTracker.reconcileAndEnrich(discovered, succeededAdapters);
 
-        // Release locks for sessions that disappeared from adapter results
+        // Release locks and emit webhooks for sessions that disappeared
         for (const id of stoppedLaunchIds) {
           ctx.lockManager.autoUnlock(id);
+          const rec = ctx.state.getSession(id);
+          if (rec) ctx.emitSessionStoppedWebhook(rec);
         }
 
         // Apply filters
@@ -522,11 +553,23 @@ function createRequestHandler(ctx: HandlerContext) {
           adapterOpts: params.adapterOpts as
             | Record<string, unknown>
             | undefined,
+          callbackSessionKey: params.callbackSessionKey as string | undefined,
+          callbackAgentId: params.callbackAgentId as string | undefined,
         });
 
         // Propagate group tag if provided
         if (params.group) {
           session.group = params.group as string;
+        }
+
+        // Propagate callback metadata
+        if (params.callbackSessionKey) {
+          session.meta.openclaw_callback_session_key =
+            params.callbackSessionKey as string;
+        }
+        if (params.callbackAgentId) {
+          session.meta.openclaw_callback_agent_id =
+            params.callbackAgentId as string;
         }
 
         const record = ctx.sessionTracker.track(session, adapterName);
@@ -576,6 +619,7 @@ function createRequestHandler(ctx: HandlerContext) {
         const stopped = ctx.sessionTracker.onSessionExit(sessionId);
         if (stopped) {
           ctx.metrics.recordSessionStopped();
+          ctx.emitSessionStoppedWebhook(stopped);
         }
 
         return null;
