@@ -102,6 +102,10 @@ export interface LaunchOpts {
   worktree?: { repo: string; branch: string };
   /** Lifecycle hooks — shell commands to run at various points */
   hooks?: LifecycleHooks;
+  /** Callback session key for orchestration (stored in meta) */
+  callbackSessionKey?: string;
+  /** Callback agent ID for orchestration (stored in meta) */
+  callbackAgentId?: string;
 }
 
 export interface LifecycleHooks {

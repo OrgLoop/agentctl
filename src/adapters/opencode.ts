@@ -23,6 +23,7 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -372,16 +373,11 @@ export class OpenCodeAdapter implements AgentAdapter {
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const opencodePath = await resolveBinaryPath("opencode");
-    const child = spawn(opencodePath, args, {
+    const child = await spawnWithRetry("opencode", args, {
       cwd,
       env,
       stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
       detached: true,
-    });
-
-    child.on("error", (err) => {
-      console.error(`[opencode] spawn error: ${err.message}`);
     });
 
     child.unref();

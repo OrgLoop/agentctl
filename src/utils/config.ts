@@ -8,6 +8,8 @@ export interface AgentCtlConfig {
   model?: string;
   cwd?: string;
   timeout?: number;
+  webhook_url?: string;
+  webhook_secret?: string;
 }
 
 export const DEFAULT_CONFIG_PATH = path.join(

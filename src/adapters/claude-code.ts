@@ -24,6 +24,7 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -480,17 +481,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const logFd = await fs.open(logPath, "w");
 
     // Capture stderr to the same log file for debugging launch failures
-    const claudePath = await resolveBinaryPath("claude");
-    const child = spawn(claudePath, args, {
+    const child = await spawnWithRetry("claude", args, {
       cwd,
       env,
       stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
       detached: true,
-    });
-
-    // Handle spawn errors (e.g. ENOENT) gracefully instead of crashing the daemon
-    child.on("error", (err) => {
-      console.error(`[claude-code] spawn error: ${err.message}`);
     });
 
     // Fully detach: child runs in its own process group.

@@ -23,6 +23,7 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -356,19 +357,13 @@ export class PiAdapter implements AgentAdapter {
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const piPath = await resolveBinaryPath("pi");
-    const child = spawn(piPath, args, {
+    const child = await spawnWithRetry("pi", args, {
       cwd,
       env,
       stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
-    child.on("error", (err) => {
-      console.error(`[pi] spawn error: ${err.message}`);
-    });
-
-    // Fully detach: child runs in its own process group.
     child.unref();
 
     const pid = child.pid;

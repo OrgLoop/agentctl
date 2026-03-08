@@ -567,6 +567,8 @@ program
   .option("--matrix <file>", "YAML matrix file for advanced sweep launch")
   .option("--on-create <script>", "Hook: run after session is created")
   .option("--on-complete <script>", "Hook: run after session completes")
+  .option("--callback-session <key>", "Callback session key for orchestration")
+  .option("--callback-agent <id>", "Callback agent ID for orchestration")
   .allowUnknownOption() // Allow interleaved --adapter/--model for parseAdapterSlots
   .action(async (adapterName: string | undefined, opts) => {
     // Load persistent config defaults; CLI flags override config values
@@ -585,6 +587,10 @@ program
             onComplete: opts.onComplete,
           }
         : undefined;
+
+    // Collect callback metadata
+    const callbackSessionKey = opts.callbackSession as string | undefined;
+    const callbackAgentId = opts.callbackAgent as string | undefined;
 
     // --- Multi-adapter / matrix detection ---
     let slots: AdapterSlot[] = [];
@@ -657,6 +663,8 @@ program
           cwd,
           hooks,
           adapters,
+          callbackSessionKey,
+          callbackAgentId,
           onSessionLaunched: (slotResult) => {
             // Track in daemon if available
             if (daemonRunning && !slotResult.error) {
@@ -740,6 +748,8 @@ program
             ? { repo: worktreeInfo.repo, branch: worktreeInfo.branch }
             : undefined,
           hooks,
+          callbackSessionKey,
+          callbackAgentId,
         });
         console.log(
           `Launched session ${shortId(session.id)} (PID: ${session.pid})`,
@@ -777,7 +787,17 @@ program
         cwd,
         model,
         hooks,
+        callbackSessionKey,
+        callbackAgentId,
       });
+
+      // Inject callback metadata into session meta
+      if (callbackSessionKey) {
+        session.meta.openclaw_callback_session_key = callbackSessionKey;
+      }
+      if (callbackAgentId) {
+        session.meta.openclaw_callback_agent_id = callbackAgentId;
+      }
       console.log(
         `Launched session ${shortId(session.id)} (PID: ${session.pid})`,
       );

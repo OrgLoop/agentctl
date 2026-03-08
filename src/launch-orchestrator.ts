@@ -35,6 +35,10 @@ export interface OrchestrateOpts {
   cwd: string;
   hooks?: LifecycleHooks;
   adapters: Record<string, AgentAdapter>;
+  /** Callback session key for orchestration */
+  callbackSessionKey?: string;
+  /** Callback agent ID for orchestration */
+  callbackAgentId?: string;
   /** Optional: callback when daemon is available for lock/track */
   onSessionLaunched?: (result: SlotLaunchResult) => void;
   /** Optional: callback when group ID is generated (before launches) */
@@ -220,12 +224,22 @@ export async function orchestrateLaunch(
         model: slot.model,
         worktree: { repo: worktree.repo, branch },
         hooks,
+        callbackSessionKey: opts.callbackSessionKey,
+        callbackAgentId: opts.callbackAgentId,
       };
 
       const session = await adapter.launch(launchOpts);
 
       // Tag the session with the group
       session.group = groupId;
+
+      // Inject callback metadata
+      if (opts.callbackSessionKey) {
+        session.meta.openclaw_callback_session_key = opts.callbackSessionKey;
+      }
+      if (opts.callbackAgentId) {
+        session.meta.openclaw_callback_agent_id = opts.callbackAgentId;
+      }
 
       const result: SlotLaunchResult = {
         slot,
