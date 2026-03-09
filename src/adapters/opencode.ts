@@ -390,8 +390,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (promptFd) await promptFd.close();
     if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
-    // Generate a pending session ID — will be resolved when OpenCode creates the session file
-    const sessionId = pid ? `pending-${pid}` : crypto.randomUUID();
+    const sessionId = crypto.randomUUID();
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
@@ -952,8 +951,8 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   private async deleteSessionMeta(sessionId: string): Promise<void> {
-    for (const id of [sessionId, `pending-${sessionId}`]) {
-      const metaPath = path.join(this.sessionsMetaDir, `${id}.json`);
+    {
+      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
       try {
         await fs.unlink(metaPath);
       } catch {

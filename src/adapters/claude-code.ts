@@ -507,8 +507,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       resolvedSessionId = await this.pollForSessionId(logPath, pid, 15000);
     }
 
-    const sessionId =
-      resolvedSessionId || (pid ? `pending-${pid}` : crypto.randomUUID());
+    const sessionId = resolvedSessionId || crypto.randomUUID();
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
@@ -1088,7 +1087,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
 
     // Scan all metadata files for one whose sessionId matches
-    // (handles resolved session IDs that were originally pending-*)
     try {
       const files = await fs.readdir(this.sessionsMetaDir);
       for (const file of files) {
@@ -1112,8 +1110,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   /** Delete stale session metadata */
   private async deleteSessionMeta(sessionId: string): Promise<void> {
-    for (const id of [sessionId, `pending-${sessionId}`]) {
-      const metaPath = path.join(this.sessionsMetaDir, `${id}.json`);
+    {
+      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
       try {
         await fs.unlink(metaPath);
       } catch {

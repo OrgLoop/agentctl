@@ -67,16 +67,6 @@ export class SessionTracker {
   track(session: AgentSession, adapterName: string): SessionRecord {
     const record = sessionToRecord(session, adapterName);
 
-    // Pending→UUID reconciliation: if this is a real session (not pending),
-    // remove any pending-PID placeholder with the same PID
-    if (!session.id.startsWith("pending-") && session.pid) {
-      for (const [id, existing] of Object.entries(this.state.getSessions())) {
-        if (id.startsWith("pending-") && existing.pid === session.pid) {
-          this.state.removeSession(id);
-        }
-      }
-    }
-
     this.state.setSession(session.id, record);
     return record;
   }
@@ -129,10 +119,6 @@ export class SessionTracker {
   ): { sessions: SessionRecord[]; stoppedLaunchIds: string[] } {
     // Build lookups for discovered sessions
     const discoveredIds = new Set(discovered.map((d) => d.id));
-    const discoveredPids = new Map<number, string>();
-    for (const d of discovered) {
-      if (d.pid) discoveredPids.set(d.pid, d.id);
-    }
 
     // 1. Convert discovered sessions to records, enriching with launch metadata
     const sessions: SessionRecord[] = discovered.map((disc) =>
@@ -144,12 +130,7 @@ export class SessionTracker {
     const now = Date.now();
 
     for (const [id, record] of Object.entries(this.state.getSessions())) {
-      if (
-        record.status !== "running" &&
-        record.status !== "idle" &&
-        record.status !== "pending"
-      )
-        continue;
+      if (record.status !== "running" && record.status !== "idle") continue;
 
       // If adapter for this session didn't succeed, include as-is from launch metadata
       // (we can't verify status, so trust the last-known state)
@@ -160,14 +141,6 @@ export class SessionTracker {
 
       // Skip if adapter returned this session (it's still active)
       if (discoveredIds.has(id)) continue;
-
-      // Check if this session's PID was resolved to a different ID (pending→UUID)
-      if (record.pid && discoveredPids.has(record.pid)) {
-        // PID was resolved to a real session — remove stale launch entry
-        this.state.removeSession(id);
-        stoppedLaunchIds.push(id);
-        continue;
-      }
 
       // Grace period: don't mark recently-launched sessions as stopped
       const launchAge = now - new Date(record.startedAt).getTime();
@@ -197,12 +170,7 @@ export class SessionTracker {
   cleanupDeadLaunches(): string[] {
     const dead: string[] = [];
     for (const [id, record] of Object.entries(this.state.getSessions())) {
-      if (
-        record.status !== "running" &&
-        record.status !== "idle" &&
-        record.status !== "pending"
-      )
-        continue;
+      if (record.status !== "running" && record.status !== "idle") continue;
 
       if (record.pid && !this.isProcessAlive(record.pid)) {
         this.state.setSession(id, {

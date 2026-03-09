@@ -231,7 +231,7 @@ export class PiAdapter implements AgentAdapter {
     const lines = opts?.lines ?? 20;
     const disc = await this.findSession(sessionId);
 
-    // Fallback for pending-* sessions: read from the launch log file
+    // Fallback: read from the launch log file
     if (!disc) {
       const meta = await this.readSessionMeta(sessionId);
       if (meta?.sessionId) {
@@ -385,8 +385,7 @@ export class PiAdapter implements AgentAdapter {
       }
     }
 
-    const sessionId =
-      resolvedSessionId || (pid ? `pending-${pid}` : crypto.randomUUID());
+    const sessionId = resolvedSessionId || crypto.randomUUID();
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
@@ -1024,8 +1023,8 @@ export class PiAdapter implements AgentAdapter {
 
   /** Delete stale session metadata */
   private async deleteSessionMeta(sessionId: string): Promise<void> {
-    for (const id of [sessionId, `pending-${sessionId}`]) {
-      const metaPath = path.join(this.sessionsMetaDir, `${id}.json`);
+    {
+      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
       try {
         await fs.unlink(metaPath);
       } catch {

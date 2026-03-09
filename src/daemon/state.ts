@@ -6,14 +6,7 @@ import path from "node:path";
 export interface SessionRecord {
   id: string;
   adapter: string;
-  status:
-    | "running"
-    | "idle"
-    | "stopped"
-    | "error"
-    | "completed"
-    | "failed"
-    | "pending";
+  status: "running" | "idle" | "stopped" | "error" | "completed" | "failed";
   startedAt: string; // ISO 8601
   stoppedAt?: string;
   cwd?: string;

@@ -586,18 +586,6 @@ function createRequestHandler(ctx: HandlerContext) {
         const id = params.id as string;
         const launchRecord = ctx.sessionTracker.getSession(id);
 
-        // Ghost pending entry with dead PID: remove from state with --force
-        if (
-          launchRecord?.id.startsWith("pending-") &&
-          params.force &&
-          launchRecord.pid &&
-          !isProcessAlive(launchRecord.pid)
-        ) {
-          ctx.lockManager.autoUnlock(launchRecord.id);
-          ctx.sessionTracker.removeSession(launchRecord.id);
-          return null;
-        }
-
         const adapterName = (params.adapter as string) || launchRecord?.adapter;
         if (!adapterName)
           throw new Error(
