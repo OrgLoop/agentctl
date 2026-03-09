@@ -1,7 +1,7 @@
 # agentctl: Parallel Multi-Adapter Launch
 
 **Date:** 2026-02-22
-**Status:** Proposal (v3)
+**Status:** Implemented (v1.2.0)
 **Inspiration:** [dmux](https://github.com/standardagents/dmux) by Justin Schroeder (FormKit)
 
 ---
@@ -108,7 +108,7 @@ Adapter + model combos only. Covers 90% of use cases. Clean, composable, no new 
 agentctl launch --adapter A --model M1 --adapter A --model M2 --adapter B -p "..."
 ```
 
-**Tier 2 — Matrix file (future, if needed)**
+**Tier 2 — Matrix file (shipped in v1.2.0)**
 For advanced sweeps, a YAML config that defines the matrix:
 
 ```yaml
@@ -128,7 +128,7 @@ matrix:
 agentctl launch --matrix agentctl-matrix.yaml
 ```
 
-This generates the cross-product and launches all variants. But this is explicitly **backlogged** — we build it only if the CLI tier proves insufficient and there's real demand for sweeps.
+This generates the cross-product and launches all variants.
 
 **The key insight:** we don't need to design the matrix interface now. The group/worktree/parallel-launch infrastructure is the same regardless. Tier 2 is just a different way to generate the launch list.
 
@@ -297,7 +297,6 @@ Each worktree gets its own lock. No special group-awareness needed — the exist
 
 ### Backlog
 - AI-generated branch names (weak model)
-- Matrix file (`--matrix config.yaml`) for advanced sweeps
 - Multi-project groups
 - Per-adapter statistics / historical tracking
 
@@ -308,4 +307,4 @@ Each worktree gets its own lock. No special group-awareness needed — the exist
 - [dmux repo](https://github.com/standardagents/dmux)
 - [workmux](https://github.com/raine/workmux) — similar concept
 - [Tweet from @jpschroeder](https://x.com/jpschroeder/status/2024507517359788224)
-- agentctl existing: `src/worktree.ts`, `src/hooks.ts`, lock manager, session tracker, 6 adapters
+- agentctl existing: `src/worktree.ts`, `src/hooks.ts`, lock manager, session tracker, 7+ adapters (claude-code, codex, codex-acp, opencode, pi, pi-rust, openclaw, generic ACP)
