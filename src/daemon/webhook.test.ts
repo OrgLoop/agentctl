@@ -73,12 +73,26 @@ describe("buildWebhookPayload", () => {
     expect(payload.adapter).toBe("claude-code");
     expect(payload.cwd).toBe("/home/user/project");
     expect(payload.duration_seconds).toBe(300);
-    expect(payload.exit_status).toBe("stopped");
+    expect(payload.exit_status).toBe(0);
     expect(payload.summary).toBe("Fix the bug");
     expect(payload.meta).toEqual({
       openclaw_callback_session_key: "key-1",
     });
     expect(payload.timestamp).toBeTruthy();
+  });
+
+  it("prefers explicit exitCode when present", () => {
+    const payload = buildWebhookPayload({
+      id: "sess-456",
+      adapter: "claude-code",
+      status: "failed",
+      startedAt: "2026-03-07T10:00:00.000Z",
+      stoppedAt: "2026-03-07T10:00:05.000Z",
+      exitCode: 137,
+      meta: {},
+    });
+
+    expect(payload.exit_status).toBe(137);
   });
 });
 
@@ -126,7 +140,7 @@ describe("emitWebhook", () => {
     expect(opts.headers["X-Agentctl-Signature"]).toBeUndefined();
   });
 
-  it("includes HMAC signature when secret is provided", async () => {
+  it("includes HMAC signatures when secret is provided", async () => {
     const payload = buildWebhookPayload({
       id: "s1",
       adapter: "claude-code",
@@ -143,6 +157,12 @@ describe("emitWebhook", () => {
     const [, opts] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(opts.headers["X-Agentctl-Signature"]).toBeTruthy();
     expect(opts.headers["X-Agentctl-Signature"]).toHaveLength(64);
+    expect(opts.headers["X-Signature"]).toBe(
+      `sha256=${opts.headers["X-Agentctl-Signature"]}`,
+    );
+    expect(opts.headers["X-Hub-Signature-256"]).toBe(
+      `sha256=${opts.headers["X-Agentctl-Signature"]}`,
+    );
   });
 
   it("does not throw on fetch failure", async () => {
