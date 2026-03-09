@@ -26,6 +26,16 @@ Research ([acpx-vs-agentctl analysis](obsidian://open?vault=My%20Notes&file=Proj
 
 **agentctl will adopt ACP as its primary agent interface strategy.**
 
+### Rollout boundary
+
+This ADR describes the architectural direction, not a claim that ACP-backed adapters are already production-ready in the public CLI.
+
+Until an ACP adapter has:
+- a packaged/distributed bridge story (or explicit documented prerequisite), and
+- discover-first rediscovery / reattach semantics that survive a fresh CLI process or daemon restart,
+
+it should remain experimental and not be registered as a public adapter.
+
 ### Principles
 
 1. **Ride on ACP, don't fight it.** agentctl's CLI and internal APIs should align with ACP primitives (sessions, prompts, cancel, permissions). Where ACP provides a clean abstraction, use it rather than reinventing.

@@ -46,6 +46,9 @@ npm install -g @orgloop/agentctl
 
 Requires Node.js >= 20.
 
+Public adapters currently shipped in the CLI: `claude-code`, `codex`, `opencode`, `pi`, `pi-rust`, and `openclaw`.
+ACP-backed adapter work is in progress internally, but adapters such as `codex-acp` are not user-visible until packaging and discover-first session reattachment are ready.
+
 ## Quick Start
 
 ```bash
