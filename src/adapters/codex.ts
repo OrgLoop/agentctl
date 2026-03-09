@@ -303,8 +303,7 @@ export class CodexAdapter implements AgentAdapter {
       resolvedSessionId = await this.pollForSessionId(logPath, pid, 10000);
     }
 
-    const sessionId =
-      resolvedSessionId || (pid ? `pending-${pid}` : crypto.randomUUID());
+    const sessionId = resolvedSessionId || crypto.randomUUID();
 
     if (pid) {
       await this.writeSessionMeta({

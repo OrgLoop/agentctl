@@ -401,8 +401,7 @@ export class PiRustAdapter implements AgentAdapter {
       resolvedSessionId = await this.pollForSessionId(logPath, pid, 5000);
     }
 
-    const sessionId =
-      resolvedSessionId || (pid ? `pending-${pid}` : crypto.randomUUID());
+    const sessionId = resolvedSessionId || crypto.randomUUID();
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
@@ -947,8 +946,8 @@ export class PiRustAdapter implements AgentAdapter {
   }
 
   private async deleteSessionMeta(sessionId: string): Promise<void> {
-    for (const id of [sessionId, `pending-${sessionId}`]) {
-      const metaPath = path.join(this.sessionsMetaDir, `${id}.json`);
+    {
+      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
       try {
         await fs.unlink(metaPath);
       } catch {

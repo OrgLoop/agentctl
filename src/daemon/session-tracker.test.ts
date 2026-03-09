@@ -69,26 +69,6 @@ describe("SessionTracker", () => {
 
       expect(state.getSession("test-session-1")).toBeDefined();
     });
-
-    it("removes pending-PID entry when real session registers with same PID", () => {
-      tracker.track(
-        makeSession({ id: "pending-11111", status: "running", pid: 11111 }),
-        "claude-code",
-      );
-      expect(state.getSession("pending-11111")).toBeDefined();
-
-      tracker.track(
-        makeSession({
-          id: "real-uuid-session",
-          status: "running",
-          pid: 11111,
-        }),
-        "claude-code",
-      );
-
-      expect(state.getSession("pending-11111")).toBeUndefined();
-      expect(state.getSession("real-uuid-session")).toBeDefined();
-    });
   });
 
   describe("getSession", () => {
@@ -132,13 +112,13 @@ describe("SessionTracker", () => {
   describe("removeSession", () => {
     it("removes a session from state", () => {
       tracker.track(
-        makeSession({ id: "pending-55555", status: "running", pid: 55555 }),
+        makeSession({ id: "session-55555", status: "running", pid: 55555 }),
         "claude-code",
       );
-      expect(state.getSession("pending-55555")).toBeDefined();
+      expect(state.getSession("session-55555")).toBeDefined();
 
-      tracker.removeSession("pending-55555");
-      expect(state.getSession("pending-55555")).toBeUndefined();
+      tracker.removeSession("session-55555");
+      expect(state.getSession("session-55555")).toBeUndefined();
     });
   });
 
@@ -265,40 +245,6 @@ describe("SessionTracker", () => {
       // Session should still be included (from launch metadata)
       expect(sessions.map((s) => s.id)).toContain("oc-session");
       expect(state.getSession("oc-session")?.status).toBe("running");
-    });
-
-    it("handles pending→UUID resolution via PID match", () => {
-      // pending entry was launched 2 min ago
-      tracker.track(
-        makeSession({
-          id: "pending-99999",
-          status: "running",
-          pid: 99999,
-          startedAt: new Date(Date.now() - 120_000),
-        }),
-        "claude-code",
-      );
-
-      // Adapter returns a resolved session with the same PID but different ID
-      const discovered = [
-        makeDiscovered({
-          id: "real-uuid",
-          status: "running",
-          adapter: "claude-code",
-          pid: 99999,
-        }),
-      ];
-
-      const { sessions, stoppedLaunchIds } = tracker.reconcileAndEnrich(
-        discovered,
-        new Set(["claude-code"]),
-      );
-
-      // pending entry should be cleaned up
-      expect(stoppedLaunchIds).toContain("pending-99999");
-      expect(state.getSession("pending-99999")).toBeUndefined();
-      // Real session should be in results
-      expect(sessions.map((s) => s.id)).toContain("real-uuid");
     });
 
     it("merges results from multiple adapters", () => {
