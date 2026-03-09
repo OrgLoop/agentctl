@@ -12,7 +12,7 @@ export interface WebhookPayload {
   cwd?: string;
   adapter: string;
   duration_seconds: number;
-  exit_status: string;
+  exit_status: number;
   summary?: string;
   meta: Record<string, unknown>;
   timestamp: string;
@@ -47,13 +47,17 @@ export function buildWebhookPayload(session: SessionRecord): WebhookPayload {
     Math.round((stoppedAt - startedAt) / 1000),
   );
 
+  const exitStatus =
+    session.exitCode ??
+    (session.status === "error" || session.status === "failed" ? 1 : 0);
+
   return {
     hook_type: "session.stopped",
     session_id: session.id,
     cwd: session.cwd,
     adapter: session.adapter,
     duration_seconds: durationSeconds,
-    exit_status: session.status,
+    exit_status: exitStatus,
     summary: session.prompt?.slice(0, 200),
     meta: session.meta ?? {},
     timestamp: new Date().toISOString(),
@@ -81,10 +85,10 @@ export async function emitWebhook(
     };
 
     if (webhookConfig.secret) {
-      headers["X-Agentctl-Signature"] = computeSignature(
-        body,
-        webhookConfig.secret,
-      );
+      const signature = computeSignature(body, webhookConfig.secret);
+      headers["X-Agentctl-Signature"] = signature;
+      headers["X-Signature"] = `sha256=${signature}`;
+      headers["X-Hub-Signature-256"] = `sha256=${signature}`;
     }
 
     // Use global fetch (available in Node 18+)
