@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-03-09
+
+### Added
+
+- Phase 1 ACP adoption — Codex adapter via ACP transport (#125, #127)
+- Lifecycle webhooks for `session.stopped` payloads (#123)
+- Callback metadata (`--callback-session`, `--callback-agent`) for orchestration (#123)
+- Spawn ENOENT retry for adapter launch resilience (#123)
+
+### Fixed
+
+- Webhook emit numeric `exit_status` + compatible HMAC headers (#128)
+
+### Docs
+
+- ADR-001: adopt ACP as primary agent interface (#126)
+
 ## [1.5.0] - 2026-02-26
 
 ### Added
