@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { ClaudeCodeAdapter } from "./adapters/claude-code.js";
 import { CodexAdapter } from "./adapters/codex.js";
+import { createCodexAcpAdapter } from "./adapters/codex-acp.js";
 import { OpenClawAdapter } from "./adapters/openclaw.js";
 import { OpenCodeAdapter } from "./adapters/opencode.js";
 import { PiAdapter } from "./adapters/pi.js";
@@ -41,6 +42,7 @@ import { createWorktree, type WorktreeInfo } from "./worktree.js";
 const adapters: Record<string, AgentAdapter> = {
   "claude-code": new ClaudeCodeAdapter(),
   codex: new CodexAdapter(),
+  "codex-acp": createCodexAcpAdapter(),
   openclaw: new OpenClawAdapter(),
   opencode: new OpenCodeAdapter(),
   pi: new PiAdapter(),

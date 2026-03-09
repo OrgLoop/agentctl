@@ -45,6 +45,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1",
     "@types/node": "^25.2.3",
     "commander": "^14.0.3",
     "tsx": "^4.21.0",

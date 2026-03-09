@@ -26,6 +26,9 @@ npm run lint:fix   # biome check --write
 - `src/core/types.ts` — Core interfaces (AgentAdapter, AgentSession, etc.)
 - `src/adapters/claude-code.ts` — Claude Code adapter (reads ~/.claude/, cross-refs PIDs)
 - `src/adapters/codex.ts` — Codex CLI adapter (reads ~/.codex/sessions/, cross-refs PIDs)
+- `src/adapters/codex-acp.ts` — Codex via ACP transport (uses @zed-industries/codex-acp bridge)
+- `src/adapters/acp/acp-client.ts` — Generic ACP client (spawns agent, manages connection via ACP SDK)
+- `src/adapters/acp/acp-adapter.ts` — Generic ACP-backed AgentAdapter implementation
 - `src/adapters/openclaw.ts` — OpenClaw gateway adapter (WebSocket RPC)
 - `src/adapters/opencode.ts` — OpenCode adapter (reads ~/.local/share/opencode/storage/, cross-refs PIDs)
 - `src/adapters/pi.ts` — Pi coding agent adapter (reads ~/.pi/, cross-refs PIDs)
