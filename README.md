@@ -309,7 +309,7 @@ Fuse timers are directory-scoped TTL timers with configurable on-expire actions.
 3. If the timer expires, the configured actions fire
 4. If the fuse is extended or cancelled before expiry, actions don't fire
 
-Fuse timers are generic and not tied to any specific infrastructure. Consumers (OrgLoop, scripts, webhooks) decide what actions to take on expiry.
+Fuse timers are generic and not tied to any specific infrastructure. Consumers decide what actions to take on expiry.
 
 ```bash
 # List active fuse timers
@@ -498,6 +498,8 @@ Implement the `AgentAdapter` interface:
 ```typescript
 interface AgentAdapter {
   id: string;
+  discover(): Promise<DiscoveredSession[]>;
+  isAlive(sessionId: string): Promise<boolean>;
   list(opts?: ListOpts): Promise<AgentSession[]>;
   peek(sessionId: string, opts?: PeekOpts): Promise<string>;
   status(sessionId: string): Promise<AgentSession>;
@@ -508,19 +510,37 @@ interface AgentAdapter {
 }
 ```
 
+The key methods are `discover()` (ground-truth session state from the adapter's runtime) and `isAlive()` (lightweight liveness check). The `list()` method delegates to `discover()` with filtering.
+
 ## Configuration
 
 agentctl stores daemon state in `~/.agentctl/`:
 
 ```
 ~/.agentctl/
+  config.json            # Persistent config defaults (optional)
   agentctl.sock          # Unix socket for CLI ↔ daemon communication
   agentctl.pid           # Daemon PID file
-  state.json             # Session tracking state
+  supervisor.pid         # Supervisor PID file
+  state.json             # Launch metadata
   locks.json             # Directory locks
   fuses.json             # Fuse timers
   daemon.stdout.log      # Daemon stdout
   daemon.stderr.log      # Daemon stderr
+```
+
+### Config File
+
+`~/.agentctl/config.json` provides persistent defaults that CLI flags override:
+
+```json
+{
+  "adapter": "claude-code",
+  "model": "claude-sonnet-4-5",
+  "cwd": "~/code/mono",
+  "webhook_url": "https://example.com/hooks/agentctl",
+  "webhook_secret": "your-hmac-secret"
+}
 ```
 
 ## Development
@@ -545,28 +565,36 @@ npm run lint          # biome check
 ```
 src/
   cli.ts                         # CLI entry point (commander)
-  core/types.ts                  # Core interfaces
+  core/types.ts                  # Core interfaces (AgentAdapter, DiscoveredSession, etc.)
   launch-orchestrator.ts         # Parallel multi-adapter launch orchestration
   matrix-parser.ts               # YAML matrix file parser + cross-product expansion
   worktree.ts                    # Git worktree create/list/clean
   hooks.ts                       # Lifecycle hook runner
+  file-context.ts                # File context builder (--file/--spec)
   adapters/claude-code.ts        # Claude Code adapter
   adapters/codex.ts              # Codex CLI adapter
   adapters/codex-acp.ts          # Codex via ACP transport
-  adapters/acp/acp-client.ts     # Generic ACP client (spawns agent, manages connection)
-  adapters/acp/acp-adapter.ts    # Generic ACP-backed AgentAdapter implementation
+  adapters/acp/acp-client.ts     # Generic ACP client
+  adapters/acp/acp-adapter.ts    # Generic ACP-backed AgentAdapter
   adapters/openclaw.ts           # OpenClaw gateway adapter
   adapters/opencode.ts           # OpenCode adapter
   adapters/pi.ts                 # Pi coding agent adapter
   adapters/pi-rust.ts            # Pi Rust adapter
-  daemon/server.ts               # Daemon: Unix socket server + HTTP metrics + webhooks
+  daemon/server.ts               # Daemon: Unix socket server + HTTP metrics
+  daemon/supervisor.ts           # Daemon supervisor (auto-restart on crash)
   daemon/session-tracker.ts      # Launch metadata tracking and reconciliation
-  daemon/lock-manager.ts         # Directory locks
-  daemon/fuse-engine.ts          # Generic directory-scoped TTL fuse timers
+  daemon/lock-manager.ts         # Auto + manual directory locks
+  daemon/fuse-engine.ts          # Directory-scoped TTL fuse timers
+  daemon/webhook.ts              # Webhook event emission
   daemon/metrics.ts              # Prometheus metrics registry
   daemon/state.ts                # State persistence
   daemon/launchagent.ts          # macOS LaunchAgent plist generator
   client/daemon-client.ts        # Unix socket client
+  utils/config.ts                # Configuration loading
+  utils/display.ts               # Display formatting utilities
+  utils/resolve-binary.ts        # Binary path resolution
+  utils/prompt-file.ts           # Prompt file handling (large prompts)
+  utils/spawn-with-retry.ts      # Spawn with ENOENT retry
   migration/migrate-locks.ts     # Migration from legacy locks
 ```
 
