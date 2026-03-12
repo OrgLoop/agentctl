@@ -2,7 +2,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type LaunchedSessionMeta, PiAdapter, type PidInfo } from "./pi.js";
+import {
+  type LaunchedSessionMeta,
+  readSessionMeta,
+  writeSessionMeta,
+} from "../utils/session-meta.js";
+import { PiAdapter, type PidInfo } from "./pi.js";
 
 let tmpDir: string;
 let piDir: string;
@@ -859,7 +864,7 @@ describe("PiAdapter", () => {
 
   describe("session lifecycle — detached processes", () => {
     it("session shows running when persisted metadata has live PID", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
       const launchedAt = sessionCreated.toISOString();
 
       await createFakePiSession({
@@ -872,8 +877,7 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "detached-session-0000-000000000000",
         pid: 55555,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/detached-test",
+        startTime: new Date().toString(),
         launchedAt,
       };
       await fs.writeFile(
@@ -905,9 +909,8 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "dead-detached-0000-0000-000000000000",
         pid: 66666,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/dead-detached-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        startTime: new Date().toString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "dead-detached-0000-0000-000000000000.json"),
@@ -941,9 +944,8 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "cleanup-session-0000-000000000000",
         pid: 77777,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/cleanup-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        startTime: new Date().toString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(metaPath, JSON.stringify(meta));
 
@@ -971,8 +973,7 @@ describe("PiAdapter", () => {
         sessionId: "meta-recycle-0000-0000-000000000000",
         pid: 88888,
         startTime: "Sun Feb 16 08:00:00 2026",
-        cwd: "/Users/test/meta-recycle-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "meta-recycle-0000-0000-000000000000.json"),
@@ -1001,8 +1002,7 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "meta-notime-0000-0000-000000000000",
         pid: 99999,
-        cwd: "/Users/test/meta-no-starttime-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "meta-notime-0000-0000-000000000000.json"),
@@ -1034,10 +1034,8 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "wrapper-dies-0000-0000-000000000000",
         pid: 44444,
-        wrapperPid: 11111,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/wrapper-dies-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        startTime: new Date().toString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "wrapper-dies-0000-0000-000000000000.json"),
@@ -1074,9 +1072,8 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "pi-complete-0000-0000-000000000000",
         pid: 55555,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/pi-complete-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        startTime: new Date().toString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "pi-complete-0000-0000-000000000000.json"),
@@ -1107,8 +1104,7 @@ describe("PiAdapter", () => {
         sessionId: "recycled-victim-0000-000000000000",
         pid: 33333,
         startTime: "Sun Feb 16 10:00:01 2026",
-        cwd: "/Users/test/pid-recycled-scenario",
-        launchedAt: new Date("2026-02-16T10:00:00Z").toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "recycled-victim-0000-000000000000.json"),
@@ -1146,9 +1142,8 @@ describe("PiAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "real-uuid-abcd-1234-5678-000000000000",
         pid: 12345,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/real-id-test",
-        launchedAt: new Date("2026-02-17T10:00:00Z").toISOString(),
+        startTime: new Date().toString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(
@@ -1175,24 +1170,22 @@ describe("PiAdapter", () => {
 
   describe("session metadata persistence", () => {
     it("writeSessionMeta and readSessionMeta round-trip", async () => {
-      await adapter.writeSessionMeta({
+      await writeSessionMeta(sessionsMetaDir, {
         sessionId: "roundtrip-session-id",
         pid: 12345,
-        cwd: "/Users/test/roundtrip",
-        prompt: "test prompt",
-        launchedAt: new Date().toISOString(),
       });
 
-      const meta = await adapter.readSessionMeta("roundtrip-session-id");
+      const meta = await readSessionMeta(
+        sessionsMetaDir,
+        "roundtrip-session-id",
+      );
       expect(meta).not.toBeNull();
       expect(meta?.sessionId).toBe("roundtrip-session-id");
       expect(meta?.pid).toBe(12345);
-      expect(meta?.cwd).toBe("/Users/test/roundtrip");
-      expect(meta?.prompt).toBe("test prompt");
     });
 
     it("readSessionMeta returns null for nonexistent session", async () => {
-      const meta = await adapter.readSessionMeta("nonexistent");
+      const meta = await readSessionMeta(sessionsMetaDir, "nonexistent");
       expect(meta).toBeNull();
     });
 
@@ -1204,12 +1197,14 @@ describe("PiAdapter", () => {
         JSON.stringify({
           sessionId: "scan-target-session",
           pid: 11111,
-          cwd: "/test",
           launchedAt: new Date().toISOString(),
         }),
       );
 
-      const meta = await adapter.readSessionMeta("scan-target-session");
+      const meta = await readSessionMeta(
+        sessionsMetaDir,
+        "scan-target-session",
+      );
       expect(meta).not.toBeNull();
       expect(meta?.sessionId).toBe("scan-target-session");
     });

@@ -24,7 +24,8 @@ export interface SessionRecord {
 export interface Lock {
   directory: string; // absolute, resolved path
   type: "auto" | "manual";
-  sessionId?: string; // for auto-locks
+  pid?: number; // for auto-locks — PID that owns the lock (drives lifecycle)
+  sessionId?: string; // for auto-locks — informational only (display/enrichment)
   lockedBy?: string; // for manual locks
   reason?: string;
   lockedAt: string; // ISO 8601

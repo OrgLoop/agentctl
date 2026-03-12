@@ -23,6 +23,7 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import { cleanupExpiredMeta, writeSessionMeta } from "../utils/session-meta.js";
 import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
@@ -39,17 +40,10 @@ export interface CodexPidInfo {
   startTime?: string;
 }
 
-/** Metadata persisted by launch() so status checks survive wrapper exit */
-export interface CodexSessionMeta {
-  sessionId: string;
-  pid: number;
-  startTime?: string;
-  wrapperPid?: number;
-  cwd: string;
-  model?: string;
-  prompt?: string;
-  launchedAt: string;
-}
+// Re-export from shared utility for backward compat
+export type { LaunchedSessionMeta as CodexSessionMeta } from "../utils/session-meta.js";
+
+import type { LaunchedSessionMeta as CodexSessionMeta } from "../utils/session-meta.js";
 
 /** Parsed session info from a Codex JSONL file */
 interface CodexSessionInfo {
@@ -135,6 +129,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async discover(): Promise<DiscoveredSession[]> {
+    cleanupExpiredMeta(this.sessionsMetaDir).catch(() => {});
     const runningPids = await this.getPids();
     const sessionInfos = await this.discoverSessions();
     const results: DiscoveredSession[] = [];
@@ -306,15 +301,7 @@ export class CodexAdapter implements AgentAdapter {
     const sessionId = resolvedSessionId || crypto.randomUUID();
 
     if (pid) {
-      await this.writeSessionMeta({
-        sessionId,
-        pid,
-        wrapperPid: process.pid,
-        cwd,
-        model: opts.model,
-        prompt: opts.prompt.slice(0, 200),
-        launchedAt: now.toISOString(),
-      });
+      await writeSessionMeta(this.sessionsMetaDir, { sessionId, pid });
     }
 
     return {
@@ -518,9 +505,6 @@ export class CodexAdapter implements AgentAdapter {
           if (sessions.some((s) => s.id === meta.sessionId)) continue;
           sessions.push({
             id: meta.sessionId,
-            cwd: meta.cwd,
-            model: meta.model,
-            firstPrompt: meta.prompt,
             created: new Date(meta.launchedAt),
             modified: new Date(meta.launchedAt),
             filePath: "",
@@ -802,60 +786,6 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   // --- Session metadata persistence ---
-
-  async writeSessionMeta(
-    meta: Omit<CodexSessionMeta, "startTime">,
-  ): Promise<void> {
-    await fs.mkdir(this.sessionsMetaDir, { recursive: true });
-
-    let startTime: string | undefined;
-    try {
-      const { stdout } = await execFileAsync("ps", [
-        "-p",
-        meta.pid.toString(),
-        "-o",
-        "lstart=",
-      ]);
-      startTime = stdout.trim() || undefined;
-    } catch {
-      // Process may have already exited
-    }
-
-    const fullMeta: CodexSessionMeta = { ...meta, startTime };
-    const metaPath = path.join(this.sessionsMetaDir, `${meta.sessionId}.json`);
-    await fs.writeFile(metaPath, JSON.stringify(fullMeta, null, 2));
-  }
-
-  async readSessionMeta(sessionId: string): Promise<CodexSessionMeta | null> {
-    const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
-    try {
-      const raw = await fs.readFile(metaPath, "utf-8");
-      return JSON.parse(raw) as CodexSessionMeta;
-    } catch {
-      // Not found
-    }
-
-    // Scan all metadata files for matching sessionId
-    try {
-      const files = await fs.readdir(this.sessionsMetaDir);
-      for (const file of files) {
-        if (!file.endsWith(".json") || file.startsWith("launch-")) continue;
-        try {
-          const raw = await fs.readFile(
-            path.join(this.sessionsMetaDir, file),
-            "utf-8",
-          );
-          const meta = JSON.parse(raw) as CodexSessionMeta;
-          if (meta.sessionId === sessionId) return meta;
-        } catch {
-          // skip
-        }
-      }
-    } catch {
-      // Dir doesn't exist
-    }
-    return null;
-  }
 
   /**
    * Synchronous-style read of session metadata (reads from cache/disk).

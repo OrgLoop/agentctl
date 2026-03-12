@@ -131,12 +131,17 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     emitWebhook(webhookConfig, payload);
   };
 
-  // 8. Initial PID liveness cleanup for daemon-launched sessions
-  //    (replaces the old validateAllSessions — much simpler, only checks launches)
+  // 8. Initial PID liveness cleanup — self-healing locks + dead session detection
+  //    Locks clean themselves via PID liveness (independent of session state).
+  const deadLockPids = lockManager.cleanupDeadLocks(isProcessAlive);
+  if (deadLockPids.length > 0) {
+    console.error(
+      `Startup cleanup: released ${deadLockPids.length} dead auto-lock(s)`,
+    );
+  }
   const initialDead = sessionTracker.cleanupDeadLaunches();
   if (initialDead.length > 0) {
     for (const id of initialDead) {
-      lockManager.autoUnlock(id);
       const rec = state.getSession(id);
       if (rec) emitSessionStoppedWebhook(rec);
     }
@@ -201,9 +206,12 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
   // 9. Resume fuse timers
   fuseEngine.resumeTimers();
 
-  // 10. Start periodic PID liveness check for lock cleanup (30s interval)
+  // 10. Start periodic PID liveness checks (30s interval)
+  //     Locks self-heal via PID liveness; session tracker handles session state.
+  const lockCleanupHandle = setInterval(() => {
+    lockManager.cleanupDeadLocks(isProcessAlive);
+  }, 30_000);
   sessionTracker.startLaunchCleanup((deadId) => {
-    lockManager.autoUnlock(deadId);
     const rec = state.getSession(deadId);
     if (rec) emitSessionStoppedWebhook(rec);
   });
@@ -285,6 +293,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
 
   // Shutdown function
   const shutdown = async () => {
+    clearInterval(lockCleanupHandle);
     sessionTracker.stopLaunchCleanup();
     fuseEngine.shutdown();
     state.flush();
@@ -460,9 +469,9 @@ function createRequestHandler(ctx: HandlerContext) {
         const { sessions: allSessions, stoppedLaunchIds } =
           ctx.sessionTracker.reconcileAndEnrich(discovered, succeededAdapters);
 
-        // Release locks and emit webhooks for sessions that disappeared
+        // Emit webhooks for sessions that disappeared
+        // (Locks are self-healing via PID liveness — no need to couple to session state)
         for (const id of stoppedLaunchIds) {
-          ctx.lockManager.autoUnlock(id);
           const rec = ctx.state.getSession(id);
           if (rec) ctx.emitSessionStoppedWebhook(rec);
         }
@@ -670,9 +679,9 @@ function createRequestHandler(ctx: HandlerContext) {
 
         const record = ctx.sessionTracker.track(session, adapterName);
 
-        // Auto-lock
-        if (cwd) {
-          ctx.lockManager.autoLock(cwd, session.id);
+        // Auto-lock by PID (self-healing — lock released when PID dies)
+        if (cwd && session.pid) {
+          ctx.lockManager.autoLock(cwd, session.pid, session.id);
         }
 
         return record;
@@ -696,8 +705,12 @@ function createRequestHandler(ctx: HandlerContext) {
           force: params.force as boolean | undefined,
         });
 
-        // Remove auto-lock
-        ctx.lockManager.autoUnlock(sessionId);
+        // Remove auto-lock (prefer PID-based, fallback to sessionId)
+        if (launchRecord?.pid) {
+          ctx.lockManager.autoUnlockByPid(launchRecord.pid);
+        } else {
+          ctx.lockManager.autoUnlock(sessionId);
+        }
 
         // Mark stopped in launch metadata
         const stopped = ctx.sessionTracker.onSessionExit(sessionId);
@@ -725,13 +738,10 @@ function createRequestHandler(ctx: HandlerContext) {
 
       // --- Prune command (#40) --- kept for CLI backward compat
       case "session.prune": {
-        // In the stateless model, there's no session registry to prune.
-        // Clean up dead launches (PID liveness check) as a best-effort action.
+        // Clean up dead locks (PID liveness) + dead session records
+        const deadPids = ctx.lockManager.cleanupDeadLocks(isProcessAlive);
         const deadIds = ctx.sessionTracker.cleanupDeadLaunches();
-        for (const id of deadIds) {
-          ctx.lockManager.autoUnlock(id);
-        }
-        return { pruned: deadIds.length };
+        return { pruned: deadIds.length + deadPids.length };
       }
 
       case "lock.list":
