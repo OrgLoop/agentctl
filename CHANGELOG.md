@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-03-12
+
+fix: PID-based locks replace session-ID-coupled locks — self-healing, adapter-independent (#115). fix: pending-* entry cleanup — TTL + dead PID removal (#114). fix: LaunchedSessionMeta minimized with 24h TTL auto-cleanup, shared utility across all 5 adapters (#112). fix: session ID consistency — canonical IDs from launch, login failure detection (#134). fix: peek reliability for short-lived sessions via launch log fallback (#135). fix: stuck session detection and cleanup on daemon startup (#122).
+
+
 ## [1.8.0] - 2026-03-11
 
 feat: Phase 1 ACP adoption via ACP transport. feat: callback metadata, lifecycle webhooks, spawn ENOENT retry. feat: complete stateless daemon core. fix: eliminate pending session IDs, resolve real ID at launch. fix: webhook emit numeric exit_status, compatible HMAC headers. fix: eliminate daemon-env.json, derive env at spawn time. fix: update resolve-binary util. docs: ADR-001 adopt ACP as primary agent interface. docs: audit and align documentation with current codebase.
