@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-03-11
+
+feat: Phase 1 ACP adoption via ACP transport. feat: callback metadata, lifecycle webhooks, spawn ENOENT retry. feat: complete stateless daemon core. fix: eliminate pending session IDs, resolve real ID at launch. fix: webhook emit numeric exit_status, compatible HMAC headers. fix: eliminate daemon-env.json, derive env at spawn time. fix: update resolve-binary util. docs: ADR-001 adopt ACP as primary agent interface. docs: audit and align documentation with current codebase.
+
+
 ### Added
 
 - Phase 1 ACP adoption — Codex adapter via ACP transport (#125, #127)
