@@ -183,6 +183,37 @@ export class SessionTracker {
     }
     return dead;
   }
+
+  /**
+   * Find running sessions older than `maxAgeMs` — candidates for "stuck" detection.
+   * Returns session IDs of running sessions that exceed the age threshold (#122).
+   */
+  getStaleSessionIds(maxAgeMs: number): string[] {
+    const stale: string[] = [];
+    const now = Date.now();
+    for (const [id, record] of Object.entries(this.state.getSessions())) {
+      if (record.status !== "running" && record.status !== "idle") continue;
+      const age = now - new Date(record.startedAt).getTime();
+      if (age > maxAgeMs) stale.push(id);
+    }
+    return stale;
+  }
+
+  /**
+   * Mark a session as stuck/errored. Used when a session is detected
+   * as alive but not making progress (#122).
+   */
+  markStuck(sessionId: string): SessionRecord | undefined {
+    const record = this.state.getSession(sessionId);
+    if (!record) return undefined;
+    const updated = {
+      ...record,
+      status: "error" as const,
+      stoppedAt: new Date().toISOString(),
+    };
+    this.state.setSession(sessionId, updated);
+    return updated;
+  }
 }
 
 /** Check if a process is alive via kill(pid, 0) signal check */

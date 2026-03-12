@@ -357,6 +357,66 @@ describe("SessionTracker", () => {
     });
   });
 
+  describe("getStaleSessionIds (#122)", () => {
+    it("returns IDs of running sessions older than threshold", () => {
+      tracker.track(
+        makeSession({
+          id: "old-running",
+          status: "running",
+          startedAt: new Date(Date.now() - 10 * 60 * 1000), // 10 min ago
+        }),
+        "claude-code",
+      );
+      tracker.track(
+        makeSession({
+          id: "new-running",
+          status: "running",
+          startedAt: new Date(), // just now
+        }),
+        "claude-code",
+      );
+
+      const stale = tracker.getStaleSessionIds(5 * 60 * 1000);
+      expect(stale).toContain("old-running");
+      expect(stale).not.toContain("new-running");
+    });
+
+    it("ignores stopped sessions", () => {
+      tracker.track(
+        makeSession({
+          id: "old-stopped",
+          status: "stopped",
+          startedAt: new Date(Date.now() - 10 * 60 * 1000),
+        }),
+        "claude-code",
+      );
+
+      const stale = tracker.getStaleSessionIds(5 * 60 * 1000);
+      expect(stale).not.toContain("old-stopped");
+    });
+  });
+
+  describe("markStuck (#122)", () => {
+    it("marks a running session as error", () => {
+      tracker.track(
+        makeSession({ id: "stuck-1", status: "running", pid: 12345 }),
+        "claude-code",
+      );
+
+      const result = tracker.markStuck("stuck-1");
+      expect(result).toBeDefined();
+      expect(result?.status).toBe("error");
+      expect(result?.stoppedAt).toBeDefined();
+
+      // Verify persisted in state
+      expect(state.getSession("stuck-1")?.status).toBe("error");
+    });
+
+    it("returns undefined for unknown session", () => {
+      expect(tracker.markStuck("unknown")).toBeUndefined();
+    });
+  });
+
   describe("startLaunchCleanup / stopLaunchCleanup", () => {
     it("periodically checks PID liveness", async () => {
       vi.useFakeTimers();

@@ -145,6 +145,59 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     );
   }
 
+  // 8b. Detect stuck sessions — running > 5 min with no assistant output (#122)
+  const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
+  const staleIds = sessionTracker.getStaleSessionIds(STUCK_THRESHOLD_MS);
+  if (staleIds.length > 0) {
+    let stuckCount = 0;
+    for (const id of staleIds) {
+      const record = state.getSession(id);
+      if (!record) continue;
+      const adapterName = record.adapter;
+      const adapter = adapters[adapterName];
+      if (!adapter) continue;
+
+      try {
+        const output = await adapter.peek(id, { lines: 1 });
+        if (!output || output.trim() === "") {
+          // Session has no assistant output — stuck at enqueue/dequeue
+          sessionTracker.markStuck(id);
+          lockManager.autoUnlock(id);
+          // Kill the stuck process
+          if (record.pid) {
+            try {
+              process.kill(record.pid, "SIGTERM");
+            } catch {
+              // Already dead
+            }
+          }
+          const stuckRec = state.getSession(id);
+          if (stuckRec) emitSessionStoppedWebhook(stuckRec);
+          stuckCount++;
+        }
+      } catch {
+        // peek failed — session not discoverable, mark stuck
+        sessionTracker.markStuck(id);
+        lockManager.autoUnlock(id);
+        if (record.pid) {
+          try {
+            process.kill(record.pid, "SIGTERM");
+          } catch {
+            // Already dead
+          }
+        }
+        const stuckRec = state.getSession(id);
+        if (stuckRec) emitSessionStoppedWebhook(stuckRec);
+        stuckCount++;
+      }
+    }
+    if (stuckCount > 0) {
+      console.error(
+        `Startup cleanup: marked ${stuckCount} stuck sessions as errored`,
+      );
+    }
+  }
+
   // 9. Resume fuse timers
   fuseEngine.resumeTimers();
 
@@ -512,9 +565,52 @@ function createRequestHandler(ctx: HandlerContext) {
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
         // Use the full session ID if we resolved it from the tracker
         const peekId = tracked?.id || (params.id as string);
-        return adapter.peek(peekId, {
-          lines: params.lines as number | undefined,
-        });
+        try {
+          return await adapter.peek(peekId, {
+            lines: params.lines as number | undefined,
+          });
+        } catch (peekErr) {
+          // Fallback: read assistant output from launch log (#135)
+          const logPath = tracked?.meta?.logPath as string | undefined;
+          if (logPath) {
+            try {
+              const logContent = await fs.readFile(logPath, "utf-8");
+              const assistantMessages: string[] = [];
+              for (const line of logContent.split("\n")) {
+                if (!line.trim()) continue;
+                try {
+                  const msg = JSON.parse(line);
+                  if (msg.type === "assistant" && msg.message?.content) {
+                    const text =
+                      typeof msg.message.content === "string"
+                        ? msg.message.content
+                        : Array.isArray(msg.message.content)
+                          ? msg.message.content
+                              .filter(
+                                (b: { type: string; text?: string }) =>
+                                  b.type === "text" && b.text,
+                              )
+                              .map(
+                                (b: { type: string; text?: string }) => b.text,
+                              )
+                              .join("\n")
+                          : "";
+                    if (text) assistantMessages.push(text);
+                  }
+                } catch {
+                  // skip malformed
+                }
+              }
+              if (assistantMessages.length > 0) {
+                const maxLines = (params.lines as number | undefined) ?? 20;
+                return assistantMessages.slice(-maxLines).join("\n---\n");
+              }
+            } catch {
+              // log file unreadable — fall through to original error
+            }
+          }
+          throw peekErr;
+        }
       }
 
       case "session.launch": {

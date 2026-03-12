@@ -33,6 +33,10 @@ const DEFAULT_CLAUDE_DIR = path.join(os.homedir(), ".claude");
 // Default: only show stopped sessions from the last 7 days
 const STOPPED_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** Patterns indicating authentication / login failures in launch output */
+const AUTH_ERROR_RE =
+  /not logged in|authentication required|unauthorized|login required/i;
+
 export interface PidInfo {
   pid: number;
   cwd: string;
@@ -53,6 +57,7 @@ export interface LaunchedSessionMeta {
   model?: string;
   prompt?: string;
   launchedAt: string;
+  logPath?: string;
 }
 
 export interface ClaudeCodeAdapterOpts {
@@ -413,7 +418,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   async peek(sessionId: string, opts?: PeekOpts): Promise<string> {
     const lines = opts?.lines ?? 20;
-    const jsonlPath = await this.findSessionFile(sessionId);
+    let jsonlPath = await this.findSessionFile(sessionId);
+
+    // Fallback: use launch log if session JSONL not found (#135)
+    if (!jsonlPath) {
+      const meta = await this.readSessionMeta(sessionId);
+      if (meta?.logPath) {
+        try {
+          await fs.access(meta.logPath);
+          jsonlPath = meta.logPath;
+        } catch {
+          // log file doesn't exist
+        }
+      }
+    }
+
     if (!jsonlPath) throw new Error(`Session not found: ${sessionId}`);
 
     const content = await fs.readFile(jsonlPath, "utf-8");
@@ -504,7 +523,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // Claude Code's stream-json format emits a line with sessionId early on.
     let resolvedSessionId: string | undefined;
     if (pid) {
-      resolvedSessionId = await this.pollForSessionId(logPath, pid, 15000);
+      const pollResult = await this.pollForSessionId(logPath, pid, 15000);
+
+      // Fail fast on auth/login errors (#134)
+      if (pollResult.error) {
+        throw new Error(`Claude Code launch failed: ${pollResult.error}`);
+      }
+
+      resolvedSessionId = pollResult.sessionId;
+
+      // Fallback: resolve canonical session ID from history.jsonl (#134)
+      if (!resolvedSessionId) {
+        resolvedSessionId = await this.resolveSessionIdFromHistory(cwd, now);
+      }
     }
 
     const sessionId = resolvedSessionId || crypto.randomUUID();
@@ -519,6 +550,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         model: opts.model,
         prompt: opts.prompt.slice(0, 200),
         launchedAt: now.toISOString(),
+        logPath,
       });
     }
 
@@ -544,12 +576,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   /**
    * Poll the launch log file for up to `timeoutMs` to extract the real session ID.
    * Claude Code's stream-json output includes sessionId in early messages.
+   * Also detects launch errors (auth failures, etc.) from the log.
    */
   private async pollForSessionId(
     logPath: string,
     pid: number,
     timeoutMs: number,
-  ): Promise<string | undefined> {
+  ): Promise<{ sessionId?: string; error?: string }> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
@@ -559,10 +592,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
           try {
             const msg = JSON.parse(line);
             if (msg.sessionId && typeof msg.sessionId === "string") {
-              return msg.sessionId;
+              return { sessionId: msg.sessionId };
+            }
+            // Detect error messages in stream-json output
+            if (msg.type === "error" || msg.error) {
+              const errMsg =
+                typeof msg.error === "string"
+                  ? msg.error
+                  : (msg.error?.message ?? msg.message ?? JSON.stringify(msg));
+              return { error: errMsg };
             }
           } catch {
-            // Not valid JSON yet
+            // Raw text (stderr) — check for known error patterns
+            if (AUTH_ERROR_RE.test(line)) {
+              return { error: line.trim() };
+            }
           }
         }
       } catch {
@@ -572,9 +616,77 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       try {
         process.kill(pid, 0);
       } catch {
-        break; // Process died
+        // Process died — do one final read for error info
+        return this.readLaunchLogForResult(logPath);
       }
       await sleep(200);
+    }
+    return {};
+  }
+
+  /**
+   * Final read of the launch log after process exit — extract session ID or error.
+   */
+  private async readLaunchLogForResult(
+    logPath: string,
+  ): Promise<{ sessionId?: string; error?: string }> {
+    try {
+      const content = await fs.readFile(logPath, "utf-8");
+      for (const line of content.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.sessionId && typeof msg.sessionId === "string") {
+            return { sessionId: msg.sessionId };
+          }
+          if (msg.type === "error" || msg.error) {
+            const errMsg =
+              typeof msg.error === "string"
+                ? msg.error
+                : (msg.error?.message ?? msg.message ?? JSON.stringify(msg));
+            return { error: errMsg };
+          }
+        } catch {
+          if (AUTH_ERROR_RE.test(line)) {
+            return { error: line.trim() };
+          }
+        }
+      }
+    } catch {
+      // Log doesn't exist
+    }
+    return {};
+  }
+
+  /**
+   * Fallback: resolve the canonical session ID from history.jsonl.
+   * Used when pollForSessionId can't extract the ID from the launch log.
+   */
+  private async resolveSessionIdFromHistory(
+    cwd: string,
+    launchTime: Date,
+  ): Promise<string | undefined> {
+    try {
+      const raw = await fs.readFile(this.historyPath, "utf-8");
+      const lines = raw.split("\n");
+      // Scan from end (most recent entries) for a match
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line) as HistoryEntry;
+          if (
+            entry.project === cwd &&
+            entry.timestamp >= launchTime.getTime() - 5000
+          ) {
+            return entry.sessionId;
+          }
+        } catch {
+          // skip
+        }
+      }
+    } catch {
+      // history.jsonl doesn't exist
     }
     return undefined;
   }
