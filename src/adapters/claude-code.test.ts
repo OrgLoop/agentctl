@@ -641,7 +641,8 @@ describe("ClaudeCodeAdapter", () => {
   describe("session lifecycle — detached processes (BUG-2, BUG-3)", () => {
     it("session shows running when persisted metadata has live PID", async () => {
       const sessionCreated = new Date("2026-02-17T10:00:00Z");
-      const launchedAt = sessionCreated.toISOString();
+      const now = new Date();
+      const launchedAt = now.toISOString(); // Must be recent to survive 24h TTL
 
       await createFakeProject("detached-test", [
         {
@@ -657,8 +658,7 @@ describe("ClaudeCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "detached-session-0000-000000000000",
         pid: 55555,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/detached-test",
+        startTime: new Date(now.getTime() + 1000).toString(), // Just after launchedAt
         launchedAt,
       };
       await fs.writeFile(
@@ -813,8 +813,7 @@ describe("ClaudeCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "meta-notime-0000-0000-000000000000",
         pid: 99999,
-        cwd: "/Users/test/meta-no-starttime-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(), // Must be recent to survive 24h TTL
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "meta-notime-0000-0000-000000000000.json"),
@@ -839,6 +838,7 @@ describe("ClaudeCodeAdapter", () => {
   describe("session lifecycle scenarios (BUG-5)", () => {
     it("wrapper dies → Claude Code continues → status shows running", async () => {
       const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const now = new Date();
 
       await createFakeProject("wrapper-dies-test", [
         {
@@ -855,10 +855,8 @@ describe("ClaudeCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "wrapper-dies-0000-0000-000000000000",
         pid: 44444,
-        wrapperPid: 11111, // Wrapper PID — dead
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/wrapper-dies-test",
-        launchedAt: sessionCreated.toISOString(),
+        startTime: new Date(now.getTime() + 1000).toString(), // Just after launchedAt
+        launchedAt: now.toISOString(), // Must be recent to survive 24h TTL
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "wrapper-dies-0000-0000-000000000000.json"),
@@ -1049,6 +1047,7 @@ describe("ClaudeCodeAdapter", () => {
 
     it("session ID is not pending- when metadata has real ID", async () => {
       const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const now = new Date();
 
       await createFakeProject("real-id-test", [
         {
@@ -1064,9 +1063,8 @@ describe("ClaudeCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "real-uuid-abcd-1234-5678-000000000000",
         pid: 12345,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/real-id-test",
-        launchedAt: sessionCreated.toISOString(),
+        startTime: new Date(now.getTime() + 1000).toString(), // Just after launchedAt
+        launchedAt: now.toISOString(), // Must be recent to survive 24h TTL
       };
       await fs.writeFile(
         path.join(

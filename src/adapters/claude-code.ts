@@ -24,6 +24,12 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import {
+  cleanupExpiredMeta,
+  deleteSessionMeta,
+  readSessionMeta,
+  writeSessionMeta,
+} from "../utils/session-meta.js";
 import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,20 +51,8 @@ export interface PidInfo {
   startTime?: string;
 }
 
-/** Metadata persisted by launch() so status checks survive wrapper exit */
-export interface LaunchedSessionMeta {
-  sessionId: string;
-  pid: number;
-  /** Process start time from `ps -p <pid> -o lstart=` for PID recycling detection */
-  startTime?: string;
-  /** The PID of the wrapper (agentctl launch) — may differ from `pid` (Claude Code process) */
-  wrapperPid?: number;
-  cwd: string;
-  model?: string;
-  prompt?: string;
-  launchedAt: string;
-  logPath?: string;
-}
+// Re-export from shared utility for backward compat
+export type { LaunchedSessionMeta } from "../utils/session-meta.js";
 
 export interface ClaudeCodeAdapterOpts {
   claudeDir?: string; // Override ~/.claude for testing
@@ -147,6 +141,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   async discover(): Promise<DiscoveredSession[]> {
+    // TTL-based cleanup of stale metadata files (24h)
+    cleanupExpiredMeta(this.sessionsMetaDir).catch(() => {});
+
     // Try fast path: read history.jsonl (single file, ~2ms)
     const historyResults = await this.discoverFromHistory();
     if (historyResults) return historyResults;
@@ -257,7 +254,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
       if (!isRunning) {
         // Check persisted metadata for detached processes
-        const meta = await this.readSessionMeta(sessionId);
+        const meta = await readSessionMeta(this.sessionsMetaDir, sessionId);
         if (meta?.pid && this.isProcessAlive(meta.pid)) {
           if (meta.startTime) {
             const metaStartMs = new Date(meta.startTime).getTime();
@@ -266,14 +263,14 @@ export class ClaudeCodeAdapter implements AgentAdapter {
               isRunning = true;
               pid = meta.pid;
             } else {
-              await this.deleteSessionMeta(sessionId);
+              await deleteSessionMeta(this.sessionsMetaDir, sessionId);
             }
           } else {
             isRunning = true;
             pid = meta.pid;
           }
         } else if (meta?.pid) {
-          await this.deleteSessionMeta(sessionId);
+          await deleteSessionMeta(this.sessionsMetaDir, sessionId);
         }
       }
 
@@ -422,7 +419,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
     // Fallback: use launch log if session JSONL not found (#135)
     if (!jsonlPath) {
-      const meta = await this.readSessionMeta(sessionId);
+      const meta = await readSessionMeta(this.sessionsMetaDir, sessionId);
       if (meta?.logPath) {
         try {
           await fs.access(meta.logPath);
@@ -542,16 +539,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
-      await this.writeSessionMeta({
-        sessionId,
-        pid,
-        wrapperPid: process.pid,
-        cwd,
-        model: opts.model,
-        prompt: opts.prompt.slice(0, 200),
-        launchedAt: now.toISOString(),
-        logPath,
-      });
+      await writeSessionMeta(this.sessionsMetaDir, { sessionId, pid });
     }
 
     const session: AgentSession = {
@@ -953,7 +941,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
     // 2. Check persisted session metadata (for detached processes that
     //    may not appear in `ps aux` filtering, e.g. after wrapper exit)
-    const meta = await this.readSessionMeta(entry.sessionId);
+    const meta = await readSessionMeta(this.sessionsMetaDir, entry.sessionId);
     if (meta?.pid) {
       // Verify the persisted PID is still alive
       if (this.isProcessAlive(meta.pid)) {
@@ -969,7 +957,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
             Math.abs(currentStartMs - recordedStartMs) > 5000
           ) {
             // Process at this PID has a different start time — recycled
-            await this.deleteSessionMeta(entry.sessionId);
+            await deleteSessionMeta(this.sessionsMetaDir, entry.sessionId);
             return false;
           }
         }
@@ -982,7 +970,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
             return true;
           }
           // Start time doesn't match — PID was recycled, clean up stale metadata
-          await this.deleteSessionMeta(entry.sessionId);
+          await deleteSessionMeta(this.sessionsMetaDir, entry.sessionId);
           return false;
         }
         // No start time in metadata — can't verify, assume alive
@@ -990,7 +978,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         return true;
       }
       // PID is dead — clean up stale metadata
-      await this.deleteSessionMeta(entry.sessionId);
+      await deleteSessionMeta(this.sessionsMetaDir, entry.sessionId);
     }
 
     // 3. Fallback: check if JSONL was modified very recently (last 60s)
@@ -1056,7 +1044,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
 
     // Check persisted metadata for detached processes
-    const meta = await this.readSessionMeta(entry.sessionId);
+    const meta = await readSessionMeta(this.sessionsMetaDir, entry.sessionId);
     if (meta?.pid && this.isProcessAlive(meta.pid)) {
       return meta.pid;
     }
@@ -1156,80 +1144,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   private async findPidForSession(sessionId: string): Promise<number | null> {
     const session = await this.status(sessionId);
     return session.pid ?? null;
-  }
-
-  // --- Session metadata persistence ---
-
-  /** Write session metadata to disk so status checks survive wrapper exit */
-  async writeSessionMeta(
-    meta: Omit<LaunchedSessionMeta, "startTime">,
-  ): Promise<void> {
-    await fs.mkdir(this.sessionsMetaDir, { recursive: true });
-
-    // Try to capture the process start time immediately
-    let startTime: string | undefined;
-    try {
-      const { stdout } = await execFileAsync("ps", [
-        "-p",
-        meta.pid.toString(),
-        "-o",
-        "lstart=",
-      ]);
-      startTime = stdout.trim() || undefined;
-    } catch {
-      // Process may have already exited or ps failed
-    }
-
-    const fullMeta: LaunchedSessionMeta = { ...meta, startTime };
-    const metaPath = path.join(this.sessionsMetaDir, `${meta.sessionId}.json`);
-    await fs.writeFile(metaPath, JSON.stringify(fullMeta, null, 2));
-  }
-
-  /** Read persisted session metadata */
-  async readSessionMeta(
-    sessionId: string,
-  ): Promise<LaunchedSessionMeta | null> {
-    // Check exact sessionId first
-    const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
-    try {
-      const raw = await fs.readFile(metaPath, "utf-8");
-      return JSON.parse(raw) as LaunchedSessionMeta;
-    } catch {
-      // File doesn't exist or is unreadable
-    }
-
-    // Scan all metadata files for one whose sessionId matches
-    try {
-      const files = await fs.readdir(this.sessionsMetaDir);
-      for (const file of files) {
-        if (!file.endsWith(".json")) continue;
-        try {
-          const raw = await fs.readFile(
-            path.join(this.sessionsMetaDir, file),
-            "utf-8",
-          );
-          const meta = JSON.parse(raw) as LaunchedSessionMeta;
-          if (meta.sessionId === sessionId) return meta;
-        } catch {
-          // skip
-        }
-      }
-    } catch {
-      // Dir doesn't exist
-    }
-    return null;
-  }
-
-  /** Delete stale session metadata */
-  private async deleteSessionMeta(sessionId: string): Promise<void> {
-    {
-      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
-      try {
-        await fs.unlink(metaPath);
-      } catch {
-        // File doesn't exist
-      }
-    }
   }
 }
 

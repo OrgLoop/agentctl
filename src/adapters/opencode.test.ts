@@ -919,6 +919,7 @@ describe("OpenCodeAdapter", () => {
   describe("session lifecycle — detached processes", () => {
     it("session shows running when persisted metadata has live PID", async () => {
       const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const now = new Date();
 
       const session = makeSession({
         directory: "/Users/test/detached-test",
@@ -933,9 +934,8 @@ describe("OpenCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: session.id,
         pid: 55555,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/detached-test",
-        launchedAt: sessionCreated.toISOString(),
+        startTime: now.toISOString(),
+        launchedAt: now.toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),
@@ -972,8 +972,7 @@ describe("OpenCodeAdapter", () => {
         sessionId: session.id,
         pid: 66666,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/dead-detached",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),
@@ -1011,8 +1010,7 @@ describe("OpenCodeAdapter", () => {
         sessionId: session.id,
         pid: 77777,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/cleanup-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(metaPath, JSON.stringify(meta));
 
@@ -1046,8 +1044,7 @@ describe("OpenCodeAdapter", () => {
         sessionId: session.id,
         pid: 88888,
         startTime: "Sun Feb 16 08:00:00 2026", // Before session — recycled
-        cwd: "/Users/test/meta-recycle",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),
@@ -1082,8 +1079,7 @@ describe("OpenCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: session.id,
         pid: 99999,
-        cwd: "/Users/test/no-starttime-meta",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),
@@ -1105,6 +1101,7 @@ describe("OpenCodeAdapter", () => {
 
     it("wrapper dies → opencode continues → status shows running", async () => {
       const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const now = new Date();
 
       const session = makeSession({
         directory: "/Users/test/wrapper-dies",
@@ -1119,10 +1116,8 @@ describe("OpenCodeAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: session.id,
         pid: 44444,
-        wrapperPid: 11111,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/wrapper-dies",
-        launchedAt: sessionCreated.toISOString(),
+        startTime: now.toISOString(),
+        launchedAt: now.toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),
@@ -1165,8 +1160,7 @@ describe("OpenCodeAdapter", () => {
         sessionId: session.id,
         pid: 55555,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/complete-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),
@@ -1203,8 +1197,7 @@ describe("OpenCodeAdapter", () => {
         sessionId: session.id,
         pid: 33333,
         startTime: "Sun Feb 16 10:00:01 2026",
-        cwd: "/Users/test/pid-recycled",
-        launchedAt: oldSessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, `${session.id}.json`),

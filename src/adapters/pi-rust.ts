@@ -23,6 +23,12 @@ import {
   writePromptFile,
 } from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
+import {
+  cleanupExpiredMeta,
+  deleteSessionMeta,
+  readSessionMeta,
+  writeSessionMeta,
+} from "../utils/session-meta.js";
 import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
@@ -40,19 +46,8 @@ export interface PidInfo {
   startTime?: string;
 }
 
-/** Metadata persisted by launch() so status checks survive wrapper exit */
-export interface LaunchedSessionMeta {
-  sessionId: string;
-  pid: number;
-  /** Process start time from `ps -p <pid> -o lstart=` for PID recycling detection */
-  startTime?: string;
-  /** The PID of the wrapper (agentctl launch) — may differ from `pid` (pi-rust process) */
-  wrapperPid?: number;
-  cwd: string;
-  model?: string;
-  prompt?: string;
-  launchedAt: string;
-}
+// Re-export from shared utility for backward compat
+export type { LaunchedSessionMeta } from "../utils/session-meta.js";
 
 export interface PiRustAdapterOpts {
   sessionDir?: string; // Override ~/.pi/agent/sessions for testing
@@ -140,6 +135,7 @@ export class PiRustAdapter implements AgentAdapter {
   }
 
   async discover(): Promise<DiscoveredSession[]> {
+    cleanupExpiredMeta(this.sessionsMetaDir).catch(() => {});
     const runningPids = await this.getPids();
     const results: DiscoveredSession[] = [];
 
@@ -405,15 +401,7 @@ export class PiRustAdapter implements AgentAdapter {
 
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
-      await this.writeSessionMeta({
-        sessionId,
-        pid,
-        wrapperPid: process.pid,
-        cwd,
-        model: opts.model,
-        prompt: opts.prompt.slice(0, 200),
-        launchedAt: now.toISOString(),
-      });
+      await writeSessionMeta(this.sessionsMetaDir, { sessionId, pid });
     }
 
     const session: AgentSession = {
@@ -683,7 +671,7 @@ export class PiRustAdapter implements AgentAdapter {
     }
 
     // 2. Check persisted session metadata
-    const meta = await this.readSessionMeta(header.id);
+    const meta = await readSessionMeta(this.sessionsMetaDir, header.id);
     if (meta?.pid) {
       if (this.isProcessAlive(meta.pid)) {
         const pidInfo = runningPids.get(meta.pid);
@@ -695,7 +683,7 @@ export class PiRustAdapter implements AgentAdapter {
             !Number.isNaN(recordedStartMs) &&
             Math.abs(currentStartMs - recordedStartMs) > 5000
           ) {
-            await this.deleteSessionMeta(header.id);
+            await deleteSessionMeta(this.sessionsMetaDir, header.id);
             return false;
           }
         }
@@ -706,12 +694,12 @@ export class PiRustAdapter implements AgentAdapter {
           if (!Number.isNaN(metaStartMs) && metaStartMs >= sessionMs - 5000) {
             return true;
           }
-          await this.deleteSessionMeta(header.id);
+          await deleteSessionMeta(this.sessionsMetaDir, header.id);
           return false;
         }
         return true;
       }
-      await this.deleteSessionMeta(header.id);
+      await deleteSessionMeta(this.sessionsMetaDir, header.id);
     }
 
     return false;
@@ -744,7 +732,7 @@ export class PiRustAdapter implements AgentAdapter {
       }
     }
 
-    const meta = await this.readSessionMeta(header.id);
+    const meta = await readSessionMeta(this.sessionsMetaDir, header.id);
     if (meta?.pid && this.isProcessAlive(meta.pid)) {
       return meta.pid;
     }
@@ -886,74 +874,6 @@ export class PiRustAdapter implements AgentAdapter {
   private async findPidForSession(sessionId: string): Promise<number | null> {
     const session = await this.status(sessionId);
     return session.pid ?? null;
-  }
-
-  // --- Session metadata persistence ---
-
-  async writeSessionMeta(
-    meta: Omit<LaunchedSessionMeta, "startTime">,
-  ): Promise<void> {
-    await fs.mkdir(this.sessionsMetaDir, { recursive: true });
-
-    let startTime: string | undefined;
-    try {
-      const { stdout } = await execFileAsync("ps", [
-        "-p",
-        meta.pid.toString(),
-        "-o",
-        "lstart=",
-      ]);
-      startTime = stdout.trim() || undefined;
-    } catch {
-      // Process may have already exited or ps failed
-    }
-
-    const fullMeta: LaunchedSessionMeta = { ...meta, startTime };
-    const metaPath = path.join(this.sessionsMetaDir, `${meta.sessionId}.json`);
-    await fs.writeFile(metaPath, JSON.stringify(fullMeta, null, 2));
-  }
-
-  async readSessionMeta(
-    sessionId: string,
-  ): Promise<LaunchedSessionMeta | null> {
-    const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
-    try {
-      const raw = await fs.readFile(metaPath, "utf-8");
-      return JSON.parse(raw) as LaunchedSessionMeta;
-    } catch {
-      // File doesn't exist or is unreadable
-    }
-
-    try {
-      const files = await fs.readdir(this.sessionsMetaDir);
-      for (const file of files) {
-        if (!file.endsWith(".json")) continue;
-        try {
-          const raw = await fs.readFile(
-            path.join(this.sessionsMetaDir, file),
-            "utf-8",
-          );
-          const meta = JSON.parse(raw) as LaunchedSessionMeta;
-          if (meta.sessionId === sessionId) return meta;
-        } catch {
-          // skip
-        }
-      }
-    } catch {
-      // Dir doesn't exist
-    }
-    return null;
-  }
-
-  private async deleteSessionMeta(sessionId: string): Promise<void> {
-    {
-      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
-      try {
-        await fs.unlink(metaPath);
-      } catch {
-        // File doesn't exist
-      }
-    }
   }
 }
 
