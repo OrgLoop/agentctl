@@ -18,6 +18,7 @@ import { OpenClawAdapter } from "./adapters/openclaw.js";
 import { OpenCodeAdapter } from "./adapters/opencode.js";
 import { PiAdapter } from "./adapters/pi.js";
 import { PiRustAdapter } from "./adapters/pi-rust.js";
+import { SlateAdapter } from "./adapters/slate.js";
 import { DaemonClient } from "./client/daemon-client.js";
 import type {
   AgentAdapter,
@@ -47,6 +48,7 @@ const adapters: Record<string, AgentAdapter> = {
   opencode: new OpenCodeAdapter(),
   pi: new PiAdapter(),
   "pi-rust": new PiRustAdapter(),
+  slate: new SlateAdapter(),
 };
 
 const client = new DaemonClient();
