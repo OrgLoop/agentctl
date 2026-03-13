@@ -1464,3 +1464,98 @@ describe("OpenCodeAdapter", () => {
     });
   });
 });
+
+// ================================================================
+// Lifecycle fuse tests → see opencode-fuse.test.ts
+// Wrapper script tests → see opencode-launch.test.ts
+// ================================================================
+
+describe("Meta-dir sessions visible in list()", () => {
+  it("lists sessions from meta dir even without native storage files", async () => {
+    const alivePids = new Set<number>([77777]);
+    const listAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+    });
+
+    // Write only a meta-dir session (no native storage)
+    const sid = "meta-only-session-0000-000000000000";
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: 77777,
+      launchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(sessionsMetaDir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+
+    const sessions = await listAdapter.list();
+    expect(sessions.length).toBe(1);
+    expect(sessions[0].id).toBe(sid);
+    expect(sessions[0].status).toBe("running");
+    expect(sessions[0].meta?.source).toBe("meta-dir");
+  });
+
+  it("shows stopped meta-dir session when exit file exists", async () => {
+    const listAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: () => false,
+    });
+
+    const sid = "stopped-meta-session-000000000000";
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: 88888,
+      launchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(sessionsMetaDir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+    await fs.writeFile(path.join(sessionsMetaDir, `${sid}.exit`), "0");
+
+    // --all to include stopped
+    const sessions = await listAdapter.list({ all: true });
+    const match = sessions.find((s) => s.id === sid);
+    expect(match).toBeDefined();
+    expect(match?.status).toBe("stopped");
+  });
+
+  it("does not duplicate sessions found in both meta-dir and native storage", async () => {
+    const alivePids = new Set<number>([99999]);
+    const listAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+    });
+
+    // Session exists in both meta-dir and native storage
+    const sid = "dual-source-session-000000000000";
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: 99999,
+      launchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(sessionsMetaDir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+
+    // Also create native storage entry
+    const session = makeSession({
+      id: sid,
+      directory: "/Users/test/my-project",
+    });
+    await createFakeSession("/Users/test/my-project", session);
+
+    const sessions = await listAdapter.list({ all: true });
+    const matches = sessions.filter((s) => s.id === sid);
+    expect(matches.length).toBe(1);
+  });
+});

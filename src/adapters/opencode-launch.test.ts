@@ -30,9 +30,12 @@ vi.mock("../utils/resolve-binary.js", () => ({
 }));
 
 // Import after mocks are declared (vitest hoists vi.mock)
-const { OpenCodeAdapter } = await import("./opencode.js");
+const { OpenCodeAdapter, generateWrapperScript } = await import(
+  "./opencode.js"
+);
 
 let tmpDir: string;
+let sessionsMetaDir: string;
 let adapter: InstanceType<typeof OpenCodeAdapter>;
 
 beforeEach(async () => {
@@ -41,7 +44,7 @@ beforeEach(async () => {
     path.join(os.tmpdir(), "agentctl-opencode-launch-"),
   );
   const storageDir = path.join(tmpDir, "storage");
-  const sessionsMetaDir = path.join(tmpDir, "opencode-sessions");
+  sessionsMetaDir = path.join(tmpDir, "opencode-sessions");
   await fs.mkdir(path.join(storageDir, "session"), { recursive: true });
   await fs.mkdir(sessionsMetaDir, { recursive: true });
 
@@ -57,8 +60,49 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
+describe("generateWrapperScript", () => {
+  it("generates a shell script that runs the binary and writes exit code", () => {
+    const script = generateWrapperScript(
+      "/usr/local/bin/opencode",
+      ["run", "--model", "gpt-4", "--", "fix bug"],
+      "/tmp/test.exit",
+    );
+    expect(script).toContain("#!/bin/sh");
+    expect(script).toContain("/usr/local/bin/opencode");
+    expect(script).toContain("'--model'");
+    expect(script).toContain("'gpt-4'");
+    expect(script).toContain("'fix bug'");
+    expect(script).toContain("EC=$?");
+    expect(script).toContain("'/tmp/test.exit'");
+  });
+
+  it("shell-escapes single quotes in arguments", () => {
+    const script = generateWrapperScript(
+      "/usr/local/bin/opencode",
+      ["run", "--", "it's a bug"],
+      "/tmp/test.exit",
+    );
+    expect(script).toContain("'it'\\''s a bug'");
+  });
+});
+
 describe("OpenCodeAdapter launch", () => {
-  it("passes --model flag when opts.model is set", async () => {
+  it("spawns /bin/sh with a wrapper script", async () => {
+    await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      cwd: tmpDir,
+    });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].cmd).toBe("/bin/sh");
+    // The arg is the wrapper script path
+    const wrapperPath = spawnCalls[0].args[0];
+    expect(wrapperPath).toContain("wrapper-");
+    expect(wrapperPath).toContain(".sh");
+  });
+
+  it("wrapper script includes --model flag when opts.model is set", async () => {
     await adapter.launch({
       adapter: "opencode",
       prompt: "fix the bug",
@@ -67,23 +111,15 @@ describe("OpenCodeAdapter launch", () => {
     });
 
     expect(spawnCalls).toHaveLength(1);
-    const args = spawnCalls[0].args;
-    expect(args).toContain("--model");
-    expect(args).toContain("deepseek-r1");
-    // --model and its value should appear before the prompt
-    const modelIdx = args.indexOf("--model");
-    const promptIdx = args.indexOf("fix the bug");
-    expect(modelIdx).toBeLessThan(promptIdx);
-    expect(args).toEqual([
-      "run",
-      "--model",
-      "deepseek-r1",
-      "--",
-      "fix the bug",
-    ]);
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).toContain("'--model'");
+    expect(wrapperContent).toContain("'deepseek-r1'");
+    expect(wrapperContent).toContain("/usr/local/bin/opencode");
   });
 
-  it("omits --model flag when opts.model is not set", async () => {
+  it("wrapper script omits --model flag when opts.model is not set", async () => {
     await adapter.launch({
       adapter: "opencode",
       prompt: "fix the bug",
@@ -91,12 +127,15 @@ describe("OpenCodeAdapter launch", () => {
     });
 
     expect(spawnCalls).toHaveLength(1);
-    const args = spawnCalls[0].args;
-    expect(args).not.toContain("--model");
-    expect(args).toEqual(["run", "--", "fix the bug"]);
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).not.toContain("'--model'");
+    expect(wrapperContent).toContain("'run'");
+    expect(wrapperContent).toContain("'fix the bug'");
   });
 
-  it("inserts -- before prompts that start with dashes (e.g. YAML frontmatter)", async () => {
+  it("wrapper script includes -- before prompts starting with dashes", async () => {
     const dashPrompt = "---\ntitle: My Spec\n---\nBuild this.";
     await adapter.launch({
       adapter: "opencode",
@@ -105,10 +144,53 @@ describe("OpenCodeAdapter launch", () => {
     });
 
     expect(spawnCalls).toHaveLength(1);
-    const args = spawnCalls[0].args;
-    // -- must appear immediately before the prompt positional
-    const separatorIdx = args.indexOf("--");
-    expect(separatorIdx).toBeGreaterThan(-1);
-    expect(args[separatorIdx + 1]).toBe(dashPrompt);
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).toContain("'--'");
+  });
+
+  it("wrapper writes .exit file alongside session meta", async () => {
+    await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      cwd: tmpDir,
+    });
+
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    // Wrapper should reference a .exit file in the sessions meta dir
+    expect(wrapperContent).toContain(".exit");
+    expect(wrapperContent).toContain("EC=$?");
+    expect(wrapperContent).toContain('echo "$EC"');
+  });
+
+  it("creates a fuse entry for the launched session", async () => {
+    const session = await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      cwd: tmpDir,
+    });
+
+    expect(session.status).toBe("running");
+    expect(session.pid).toBe(99999);
+    expect(session.adapter).toBe("opencode");
+  });
+
+  it("persists session metadata with cwd and model", async () => {
+    const session = await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      model: "gpt-4o",
+      cwd: tmpDir,
+    });
+
+    const metaPath = path.join(sessionsMetaDir, `${session.id}.json`);
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf-8"));
+    expect(meta.cwd).toBe(tmpDir);
+    expect(meta.model).toBe("gpt-4o");
+    expect(meta.prompt).toBe("fix the bug");
+    expect(meta.adapter).toBe("opencode");
   });
 });
