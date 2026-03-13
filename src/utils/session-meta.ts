@@ -21,6 +21,18 @@ export interface LaunchedSessionMeta {
   launchedAt: string; // ISO 8601 — used for TTL expiry
   /** Path to adapter launch log — used as fallback for peek on short-lived sessions */
   logPath?: string;
+  /** Exit code written by the wrapper script (undefined = still running or unknown) */
+  exitCode?: number;
+  /** Working directory at launch */
+  cwd?: string;
+  /** Model used for the session */
+  model?: string;
+  /** First 200 chars of the prompt */
+  prompt?: string;
+  /** Adapter ID (e.g. "opencode") */
+  adapter?: string;
+  /** Launch group tag (e.g. "g-a1b2c3") */
+  group?: string;
 }
 
 /**
@@ -29,7 +41,15 @@ export interface LaunchedSessionMeta {
  */
 export async function writeSessionMeta(
   metaDir: string,
-  meta: { sessionId: string; pid: number },
+  meta: {
+    sessionId: string;
+    pid: number;
+    cwd?: string;
+    model?: string;
+    prompt?: string;
+    adapter?: string;
+    group?: string;
+  },
 ): Promise<void> {
   await fs.mkdir(metaDir, { recursive: true });
 
@@ -51,6 +71,11 @@ export async function writeSessionMeta(
     pid: meta.pid,
     startTime,
     launchedAt: new Date().toISOString(),
+    cwd: meta.cwd,
+    model: meta.model,
+    prompt: meta.prompt,
+    adapter: meta.adapter,
+    group: meta.group,
   };
   const metaPath = path.join(metaDir, `${meta.sessionId}.json`);
   await fs.writeFile(metaPath, JSON.stringify(fullMeta, null, 2));
@@ -143,4 +168,54 @@ export async function cleanupExpiredMeta(metaDir: string): Promise<number> {
 function isMetaExpired(meta: LaunchedSessionMeta): boolean {
   if (!meta.launchedAt) return false;
   return Date.now() - new Date(meta.launchedAt).getTime() > META_TTL_MS;
+}
+
+/**
+ * List all non-expired session metadata files.
+ */
+export async function listSessionMeta(
+  metaDir: string,
+): Promise<LaunchedSessionMeta[]> {
+  const results: LaunchedSessionMeta[] = [];
+  try {
+    const files = await fs.readdir(metaDir);
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const filePath = path.join(metaDir, file);
+        const raw = await fs.readFile(filePath, "utf-8");
+        const meta = JSON.parse(raw) as LaunchedSessionMeta;
+        if (isMetaExpired(meta)) {
+          await fs.unlink(filePath).catch(() => {});
+          continue;
+        }
+        results.push(meta);
+      } catch {
+        // skip unreadable files
+      }
+    }
+  } catch {
+    // Dir doesn't exist
+  }
+  return results;
+}
+
+/**
+ * Atomically update specific fields on an existing session meta file.
+ */
+export async function updateSessionMeta(
+  metaDir: string,
+  sessionId: string,
+  updates: Partial<LaunchedSessionMeta>,
+): Promise<boolean> {
+  const metaPath = path.join(metaDir, `${sessionId}.json`);
+  try {
+    const raw = await fs.readFile(metaPath, "utf-8");
+    const meta = JSON.parse(raw) as LaunchedSessionMeta;
+    Object.assign(meta, updates);
+    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
 }

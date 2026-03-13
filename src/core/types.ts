@@ -67,7 +67,8 @@ export interface LifecycleEvent {
     | "session.started"
     | "session.stopped"
     | "session.idle"
-    | "session.error";
+    | "session.error"
+    | "session.timeout";
   adapter: string;
   sessionId: string;
   session: AgentSession;
@@ -102,6 +103,8 @@ export interface LaunchOpts {
   worktree?: { repo: string; branch: string };
   /** Lifecycle hooks — shell commands to run at various points */
   hooks?: LifecycleHooks;
+  /** Master timeout in ms — emits session.timeout after this duration (default: 3h) */
+  timeout?: number;
   /** Callback session key for orchestration (stored in meta) */
   callbackSessionKey?: string;
   /** Callback agent ID for orchestration (stored in meta) */

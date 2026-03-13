@@ -26,10 +26,10 @@ import { resolveBinaryPath } from "../utils/resolve-binary.js";
 import {
   cleanupExpiredMeta,
   deleteSessionMeta,
+  type LaunchedSessionMeta,
   readSessionMeta,
   writeSessionMeta,
 } from "../utils/session-meta.js";
-import { spawnWithRetry } from "../utils/spawn-with-retry.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -43,6 +43,12 @@ const DEFAULT_STORAGE_DIR = path.join(
 
 // Default: only show stopped sessions from the last 7 days
 const STOPPED_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Default master timeout: 3 hours */
+const DEFAULT_MASTER_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+
+/** PID poll interval: 15 seconds */
+const POLL_INTERVAL_MS = 15_000;
 
 export interface PidInfo {
   pid: number;
@@ -107,12 +113,28 @@ export interface OpenCodeMessageFile {
   providerID?: string;
 }
 
+/** Per-session fuse state — tracks the three lifecycle signals */
+export interface SessionFuse {
+  sessionId: string;
+  pid: number;
+  exitFilePath: string;
+  launchedAt: Date;
+  timeoutMs: number;
+  abortController: AbortController;
+  /** Cached session object for event emission */
+  session: AgentSession;
+}
+
 export interface OpenCodeAdapterOpts {
   storageDir?: string; // Override ~/.local/share/opencode/storage for testing
   sessionsMetaDir?: string; // Override metadata dir for testing
   getPids?: () => Promise<Map<number, PidInfo>>; // Override PID detection for testing
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
+  /** Override master timeout for testing (default: 3h) */
+  masterTimeoutMs?: number;
+  /** Override poll interval for testing (default: 15s) */
+  pollIntervalMs?: number;
 }
 
 /**
@@ -123,8 +145,36 @@ export function computeProjectHash(directory: string): string {
 }
 
 /**
+ * Generate a wrapper shell script that runs opencode and writes exit code to a file.
+ * This gives us immediate exit code capture — the primary signal in the fuse.
+ */
+export function generateWrapperScript(
+  opencodeBin: string,
+  args: string[],
+  exitFilePath: string,
+): string {
+  // Shell-escape each arg: wrap in single quotes, escape embedded single quotes
+  const escapedArgs = args
+    .map((a) => `'${a.replace(/'/g, "'\\''")}'`)
+    .join(" ");
+  return [
+    "#!/bin/sh",
+    `${opencodeBin} ${escapedArgs}`,
+    `EC=$?`,
+    `echo "$EC" > '${exitFilePath.replace(/'/g, "'\\''")}'`,
+    `exit $EC`,
+  ].join("\n");
+}
+
+/**
  * OpenCode adapter — reads session data from ~/.local/share/opencode/storage/
  * and cross-references with running opencode processes.
+ *
+ * Implements three-prong session lifecycle fuse:
+ * 1. Wrapper exit hook (writes .exit file with exit code)
+ * 2. PID death poll (kill(pid,0) every 15s)
+ * 3. Master timeout (configurable, default 3h)
+ * First signal to fire cancels the others via AbortController.
  */
 export class OpenCodeAdapter implements AgentAdapter {
   readonly id = "opencode";
@@ -134,6 +184,15 @@ export class OpenCodeAdapter implements AgentAdapter {
   private readonly sessionsMetaDir: string;
   private readonly getPids: () => Promise<Map<number, PidInfo>>;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly masterTimeoutMs: number;
+  private readonly pollIntervalMs: number;
+
+  /** Active fuses for launched sessions — keyed by sessionId */
+  private readonly fuses = new Map<string, SessionFuse>();
+
+  /** Session IDs that have already fired a fuse event — prevents re-emission by legacy poll */
+  private readonly firedFuseIds = new Set<string>();
+  private readonly pendingFuseEvents: LifecycleEvent[] = [];
 
   constructor(opts?: OpenCodeAdapterOpts) {
     this.storageDir = opts?.storageDir || DEFAULT_STORAGE_DIR;
@@ -144,6 +203,8 @@ export class OpenCodeAdapter implements AgentAdapter {
       path.join(os.homedir(), ".agentctl", "opencode-sessions");
     this.getPids = opts?.getPids || getOpenCodePids;
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
+    this.masterTimeoutMs = opts?.masterTimeoutMs ?? DEFAULT_MASTER_TIMEOUT_MS;
+    this.pollIntervalMs = opts?.pollIntervalMs ?? POLL_INTERVAL_MS;
   }
 
   async discover(): Promise<DiscoveredSession[]> {
@@ -215,46 +276,13 @@ export class OpenCodeAdapter implements AgentAdapter {
   async list(opts?: ListOpts): Promise<AgentSession[]> {
     const runningPids = await this.getPids();
     const sessions: AgentSession[] = [];
+    const seenIds = new Set<string>();
 
-    let projectDirs: string[];
-    try {
-      projectDirs = await fs.readdir(this.sessionDir);
-    } catch {
-      return [];
-    }
+    // Primary source: opencode's native storage (has rich metadata + PID recycling)
+    await this.listFromNativeStorage(sessions, seenIds, runningPids, opts);
 
-    for (const projHash of projectDirs) {
-      const projPath = path.join(this.sessionDir, projHash);
-      const stat = await fs.stat(projPath).catch(() => null);
-      if (!stat?.isDirectory()) continue;
-
-      const sessionFiles = await this.getSessionFilesForProject(projPath);
-
-      for (const sessionData of sessionFiles) {
-        const session = await this.buildSession(sessionData, runningPids);
-
-        // Filter by status
-        if (opts?.status && session.status !== opts.status) continue;
-
-        // If not --all, skip old stopped sessions
-        if (!opts?.all && session.status === "stopped") {
-          const age = Date.now() - session.startedAt.getTime();
-          if (age > STOPPED_SESSION_MAX_AGE_MS) continue;
-        }
-
-        // Default: only show running sessions unless --all
-        if (
-          !opts?.all &&
-          !opts?.status &&
-          session.status !== "running" &&
-          session.status !== "idle"
-        ) {
-          continue;
-        }
-
-        sessions.push(session);
-      }
-    }
+    // Supplementary: meta dir for agentctl-launched sessions not in native storage
+    await this.listFromMetaDir(sessions, seenIds, runningPids, opts);
 
     // Sort: running first, then by most recent
     sessions.sort((a, b) => {
@@ -364,12 +392,28 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
 
+    const sessionId = crypto.randomUUID();
+    const exitFilePath = path.join(this.sessionsMetaDir, `${sessionId}.exit`);
+
     // Write stdout/stderr to a log file so we don't keep pipes open
     // (which would prevent full detachment of the child process).
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const child = await spawnWithRetry("opencode", args, {
+    // Generate wrapper script that captures exit code
+    const opencodeBin = await resolveBinaryPath("opencode");
+    const wrapperScript = generateWrapperScript(
+      opencodeBin,
+      args,
+      exitFilePath,
+    );
+    const wrapperPath = path.join(
+      this.sessionsMetaDir,
+      `wrapper-${sessionId}.sh`,
+    );
+    await fs.writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
+
+    const child = spawn("/bin/sh", [wrapperPath], {
       cwd,
       env,
       stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
@@ -386,11 +430,16 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (promptFd) await promptFd.close();
     if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
-    const sessionId = crypto.randomUUID();
-
     // Persist session metadata so status checks work after wrapper exits
     if (pid) {
-      await writeSessionMeta(this.sessionsMetaDir, { sessionId, pid });
+      await writeSessionMeta(this.sessionsMetaDir, {
+        sessionId,
+        pid,
+        cwd,
+        model: opts.model,
+        prompt: opts.prompt.slice(0, 200),
+        adapter: this.id,
+      });
     }
 
     const session: AgentSession = {
@@ -407,6 +456,21 @@ export class OpenCodeAdapter implements AgentAdapter {
         spec: opts.spec,
       },
     };
+
+    // Register fuse for this session
+    if (pid) {
+      const timeoutMs = opts.timeout ?? this.masterTimeoutMs;
+      const fuse: SessionFuse = {
+        sessionId,
+        pid,
+        exitFilePath,
+        launchedAt: now,
+        timeoutMs,
+        abortController: new AbortController(),
+        session,
+      };
+      this.fuses.set(sessionId, fuse);
+    }
 
     return session;
   }
@@ -457,7 +521,19 @@ export class OpenCodeAdapter implements AgentAdapter {
     await logFd.close();
   }
 
+  /**
+   * Three-prong lifecycle fuse event generator.
+   *
+   * For each tracked session, checks three signals every poll cycle:
+   * 1. Exit file exists → session.stopped with exit code
+   * 2. PID dead (kill(pid,0) fails) → session.stopped with unknown exit code
+   * 3. Master timeout exceeded → session.timeout
+   *
+   * First signal to fire cancels the others via AbortController.
+   * Also falls back to the legacy poll for sessions not launched via agentctl.
+   */
   async *events(): AsyncIterable<LifecycleEvent> {
+    // Legacy tracking for sessions discovered from native storage
     let knownSessions = new Map<string, AgentSession>();
 
     const initial = await this.list({ all: true });
@@ -465,7 +541,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       knownSessions.set(s.id, s);
     }
 
-    // Poll + fs.watch hybrid
+    // Poll + fs.watch hybrid for native storage
     let watcher: ReturnType<typeof watch> | undefined;
     try {
       watcher = watch(this.sessionDir, { recursive: true });
@@ -475,12 +551,23 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     try {
       while (true) {
-        await sleep(5000);
+        // Re-scan meta dir for newly launched sessions not yet tracked
+        await this.bootstrapFusesFromMeta();
 
+        // Check fuses for tracked sessions (three-prong)
+        yield* this.checkFuses();
+
+        // Sleep before next cycle
+        await sleep(this.pollIntervalMs);
+
+        // Legacy poll for native-storage sessions
         const current = await this.list({ all: true });
         const currentMap = new Map(current.map((s) => [s.id, s]));
 
         for (const [id, session] of currentMap) {
+          // Skip sessions tracked by fuse — they're handled above
+          if (this.fuses.has(id) || this.firedFuseIds.has(id)) continue;
+
           const prev = knownSessions.get(id);
           if (!prev) {
             yield {
@@ -516,6 +603,290 @@ export class OpenCodeAdapter implements AgentAdapter {
       }
     } finally {
       watcher?.close();
+      // Clean up any remaining fuses
+      for (const fuse of this.fuses.values()) {
+        fuse.abortController.abort();
+      }
+      this.fuses.clear();
+    }
+  }
+
+  // --- Fuse management ---
+
+  /**
+   * Check all active fuses for signals. Yields events for any that fired.
+   * First signal cancels the others (AbortController pattern).
+   */
+  private async *checkFuses(): AsyncIterable<LifecycleEvent> {
+    for (const [sessionId, fuse] of this.fuses) {
+      if (fuse.abortController.signal.aborted) {
+        this.fuses.delete(sessionId);
+        continue;
+      }
+
+      // Signal 1: Exit file exists (wrapper completed)
+      const exitCode = await this.readExitFile(fuse.exitFilePath);
+      if (exitCode !== null) {
+        fuse.abortController.abort();
+        this.fuses.delete(sessionId);
+        this.firedFuseIds.add(sessionId);
+        const session = {
+          ...fuse.session,
+          status: "stopped" as const,
+          stoppedAt: new Date(),
+        };
+        yield {
+          type: "session.stopped",
+          adapter: this.id,
+          sessionId,
+          session,
+          timestamp: new Date(),
+          meta: { exitCode, signal: "exit-file" },
+        };
+        continue;
+      }
+
+      // Signal 2: PID death poll
+      if (!this.isProcessAlive(fuse.pid)) {
+        fuse.abortController.abort();
+        this.fuses.delete(sessionId);
+        this.firedFuseIds.add(sessionId);
+        const session = {
+          ...fuse.session,
+          status: "stopped" as const,
+          stoppedAt: new Date(),
+        };
+        yield {
+          type: "session.stopped",
+          adapter: this.id,
+          sessionId,
+          session,
+          timestamp: new Date(),
+          meta: { signal: "pid-death" },
+        };
+        continue;
+      }
+
+      // Signal 3: Master timeout
+      const elapsed = Date.now() - fuse.launchedAt.getTime();
+      if (elapsed >= fuse.timeoutMs) {
+        fuse.abortController.abort();
+        this.fuses.delete(sessionId);
+        this.firedFuseIds.add(sessionId);
+        yield {
+          type: "session.timeout",
+          adapter: this.id,
+          sessionId,
+          session: fuse.session,
+          timestamp: new Date(),
+          meta: { timeoutMs: fuse.timeoutMs, signal: "master-timeout" },
+        };
+      }
+    }
+  }
+
+  /**
+   * Bootstrap fuses for meta-dir sessions not yet tracked.
+   * Called each poll cycle to pick up sessions launched between cycles.
+   *
+   * Creates fuses even for dead PIDs — checkFuses will immediately detect
+   * the death and emit session.stopped on the next cycle.
+   */
+  private async bootstrapFusesFromMeta(): Promise<void> {
+    let files: string[];
+    try {
+      files = await fs.readdir(this.sessionsMetaDir);
+    } catch {
+      return;
+    }
+
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const sessionId = file.replace(/\.json$/, "");
+
+      // Skip if already tracked or already fired
+      if (this.fuses.has(sessionId) || this.firedFuseIds.has(sessionId))
+        continue;
+
+      const meta = await readSessionMeta(this.sessionsMetaDir, sessionId);
+      if (!meta?.pid) continue;
+
+      // Create fuse if PID is alive or exit file exists.
+      // If exit file exists, checkFuses will fire immediately on next cycle.
+      // If PID is dead with no exit file, checkFuses detects that too.
+      const exitFilePath = path.join(this.sessionsMetaDir, `${sessionId}.exit`);
+      const hasExitFile = (await this.readExitFile(exitFilePath)) !== null;
+      if (!hasExitFile && !this.isProcessAlive(meta.pid)) continue;
+
+      const launchedAt = new Date(meta.launchedAt);
+
+      const session: AgentSession = {
+        id: sessionId,
+        adapter: this.id,
+        status: "running",
+        startedAt: launchedAt,
+        pid: meta.pid,
+        cwd: meta.cwd,
+        model: meta.model,
+        prompt: meta.prompt,
+        meta: { source: "meta-dir" },
+      };
+
+      this.fuses.set(sessionId, {
+        sessionId,
+        pid: meta.pid,
+        exitFilePath,
+        launchedAt,
+        timeoutMs: this.masterTimeoutMs,
+        abortController: new AbortController(),
+        session,
+      });
+    }
+  }
+
+  /**
+   * Read exit code from a .exit file. Returns null if file doesn't exist.
+   */
+  private async readExitFile(exitFilePath: string): Promise<number | null> {
+    try {
+      const content = await fs.readFile(exitFilePath, "utf-8");
+      const code = parseInt(content.trim(), 10);
+      return Number.isNaN(code) ? null : code;
+    } catch {
+      return null;
+    }
+  }
+
+  // --- list() helpers ---
+
+  /**
+   * Enumerate sessions from the meta dir (agentctl-launched sessions).
+   * This is the primary source — these sessions may not appear in native storage.
+   */
+  private async listFromMetaDir(
+    sessions: AgentSession[],
+    seenIds: Set<string>,
+    _runningPids: Map<number, PidInfo>,
+    opts?: ListOpts,
+  ): Promise<void> {
+    let files: string[];
+    try {
+      files = await fs.readdir(this.sessionsMetaDir);
+    } catch {
+      return;
+    }
+
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const sessionId = file.replace(/\.json$/, "");
+      if (seenIds.has(sessionId)) continue;
+
+      let meta: LaunchedSessionMeta | null;
+      try {
+        const raw = await fs.readFile(
+          path.join(this.sessionsMetaDir, file),
+          "utf-8",
+        );
+        meta = JSON.parse(raw) as LaunchedSessionMeta;
+      } catch {
+        continue;
+      }
+      if (!meta?.sessionId) continue;
+
+      // Check if it has an exit file → stopped
+      const exitFilePath = path.join(this.sessionsMetaDir, `${sessionId}.exit`);
+      const exitCode = await this.readExitFile(exitFilePath);
+      const pidAlive = meta.pid ? this.isProcessAlive(meta.pid) : false;
+      const isRunning = exitCode === null && pidAlive;
+
+      const launchedAt = meta.launchedAt
+        ? new Date(meta.launchedAt)
+        : new Date();
+
+      const session: AgentSession = {
+        id: meta.sessionId,
+        adapter: this.id,
+        status: isRunning ? "running" : "stopped",
+        startedAt: launchedAt,
+        stoppedAt: isRunning ? undefined : new Date(),
+        pid: isRunning ? meta.pid : undefined,
+        cwd: meta.cwd,
+        model: meta.model,
+        prompt: meta.prompt,
+        group: meta.group,
+        meta: { source: "meta-dir", exitCode: exitCode ?? undefined },
+      };
+
+      // Apply filters
+      if (opts?.status && session.status !== opts.status) continue;
+      if (!opts?.all && session.status === "stopped") {
+        const age = Date.now() - session.startedAt.getTime();
+        if (age > STOPPED_SESSION_MAX_AGE_MS) continue;
+      }
+      if (
+        !opts?.all &&
+        !opts?.status &&
+        session.status !== "running" &&
+        session.status !== "idle"
+      ) {
+        continue;
+      }
+
+      seenIds.add(sessionId);
+      sessions.push(session);
+    }
+  }
+
+  /**
+   * Enumerate sessions from opencode's native storage directory.
+   */
+  private async listFromNativeStorage(
+    sessions: AgentSession[],
+    seenIds: Set<string>,
+    runningPids: Map<number, PidInfo>,
+    opts?: ListOpts,
+  ): Promise<void> {
+    let projectDirs: string[];
+    try {
+      projectDirs = await fs.readdir(this.sessionDir);
+    } catch {
+      return;
+    }
+
+    for (const projHash of projectDirs) {
+      const projPath = path.join(this.sessionDir, projHash);
+      const stat = await fs.stat(projPath).catch(() => null);
+      if (!stat?.isDirectory()) continue;
+
+      const sessionFiles = await this.getSessionFilesForProject(projPath);
+
+      for (const sessionData of sessionFiles) {
+        if (seenIds.has(sessionData.id)) continue;
+
+        const session = await this.buildSession(sessionData, runningPids);
+
+        // Filter by status
+        if (opts?.status && session.status !== opts.status) continue;
+
+        // If not --all, skip old stopped sessions
+        if (!opts?.all && session.status === "stopped") {
+          const age = Date.now() - session.startedAt.getTime();
+          if (age > STOPPED_SESSION_MAX_AGE_MS) continue;
+        }
+
+        // Default: only show running sessions unless --all
+        if (
+          !opts?.all &&
+          !opts?.status &&
+          session.status !== "running" &&
+          session.status !== "idle"
+        ) {
+          continue;
+        }
+
+        seenIds.add(sessionData.id);
+        sessions.push(session);
+      }
     }
   }
 

@@ -80,7 +80,7 @@ describe("Large prompt handling — OpenCode", () => {
     });
   });
 
-  it("passes small prompt as CLI arg", async () => {
+  it("passes small prompt in wrapper script CLI arg", async () => {
     await adapter.launch({
       adapter: "opencode",
       prompt: smallPrompt,
@@ -88,7 +88,11 @@ describe("Large prompt handling — OpenCode", () => {
     });
 
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0].args).toContain(smallPrompt);
+    // Now launches via wrapper: /bin/sh <wrapper.sh>
+    expect(spawnCalls[0].cmd).toBe("/bin/sh");
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+    expect(wrapperContent).toContain(smallPrompt);
     // stdin should be "ignore" for small prompts
     expect(spawnCalls[0].opts.stdio[0]).toBe("ignore");
   });
@@ -101,9 +105,11 @@ describe("Large prompt handling — OpenCode", () => {
     });
 
     expect(spawnCalls).toHaveLength(1);
-    // Large prompt must NOT appear in args
-    expect(spawnCalls[0].args).not.toContain(largePrompt);
-    expect(spawnCalls[0].args).toEqual(["run"]);
+    // Wrapper script should NOT contain the large prompt
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+    expect(wrapperContent).not.toContain(largePrompt);
+    expect(wrapperContent).toContain("'run'");
     // stdin should be a file descriptor (number), not "ignore"
     expect(typeof spawnCalls[0].opts.stdio[0]).toBe("number");
   });

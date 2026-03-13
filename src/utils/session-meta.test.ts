@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   cleanupExpiredMeta,
   deleteSessionMeta,
+  listSessionMeta,
   readSessionMeta,
+  updateSessionMeta,
   writeSessionMeta,
 } from "./session-meta.js";
 
@@ -129,6 +131,76 @@ describe("session-meta", () => {
     it("returns 0 for non-existent directory", async () => {
       const cleaned = await cleanupExpiredMeta("/tmp/does-not-exist-cleanup");
       expect(cleaned).toBe(0);
+    });
+  });
+
+  describe("listSessionMeta", () => {
+    it("lists all non-expired metadata files", async () => {
+      await writeSessionMeta(tmpDir, { sessionId: "s1", pid: 11111 });
+      await writeSessionMeta(tmpDir, { sessionId: "s2", pid: 22222 });
+
+      const metas = await listSessionMeta(tmpDir);
+      expect(metas).toHaveLength(2);
+      const ids = metas.map((m) => m.sessionId).sort();
+      expect(ids).toEqual(["s1", "s2"]);
+    });
+
+    it("skips expired metadata", async () => {
+      await writeSessionMeta(tmpDir, { sessionId: "fresh", pid: 11111 });
+      // Write an expired meta manually
+      await fs.writeFile(
+        path.join(tmpDir, "old.json"),
+        JSON.stringify({
+          sessionId: "old",
+          pid: 22222,
+          launchedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        }),
+      );
+
+      const metas = await listSessionMeta(tmpDir);
+      expect(metas).toHaveLength(1);
+      expect(metas[0].sessionId).toBe("fresh");
+    });
+
+    it("returns empty array for non-existent directory", async () => {
+      const metas = await listSessionMeta("/tmp/does-not-exist-list");
+      expect(metas).toEqual([]);
+    });
+  });
+
+  describe("updateSessionMeta", () => {
+    it("updates specific fields on an existing meta file", async () => {
+      await writeSessionMeta(tmpDir, { sessionId: "s1", pid: 11111 });
+      const updated = await updateSessionMeta(tmpDir, "s1", {
+        exitCode: 42,
+      });
+      expect(updated).toBe(true);
+
+      const meta = await readSessionMeta(tmpDir, "s1");
+      expect(meta?.exitCode).toBe(42);
+      expect(meta?.pid).toBe(11111); // unchanged
+    });
+
+    it("returns false for non-existent session", async () => {
+      const updated = await updateSessionMeta(tmpDir, "nonexistent", {
+        exitCode: 1,
+      });
+      expect(updated).toBe(false);
+    });
+
+    it("preserves extra fields written by writeSessionMeta", async () => {
+      await writeSessionMeta(tmpDir, {
+        sessionId: "s1",
+        pid: 11111,
+        cwd: "/some/path",
+        model: "gpt-4o",
+      });
+      await updateSessionMeta(tmpDir, "s1", { exitCode: 0 });
+
+      const meta = await readSessionMeta(tmpDir, "s1");
+      expect(meta?.cwd).toBe("/some/path");
+      expect(meta?.model).toBe("gpt-4o");
+      expect(meta?.exitCode).toBe(0);
     });
   });
 });

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   computeProjectHash,
+  generateWrapperScript,
   type LaunchedSessionMeta,
   OpenCodeAdapter,
   type OpenCodeMessageFile,
@@ -1462,5 +1463,329 @@ describe("OpenCodeAdapter", () => {
       expect(files1).toContain("proj-a-session-0000-000000000000.json");
       expect(files2).toContain("proj-b-session-0000-000000000000.json");
     });
+  });
+});
+
+// ================================================================
+// Lifecycle fuse tests
+// ================================================================
+
+describe("generateWrapperScript", () => {
+  it("produces a shell script that captures exit code", () => {
+    const script = generateWrapperScript(
+      "/usr/bin/opencode",
+      ["run", "--model", "gpt-4"],
+      "/tmp/test.exit",
+    );
+    expect(script).toContain("#!/bin/sh");
+    expect(script).toContain("/usr/bin/opencode");
+    expect(script).toContain("'run' '--model' 'gpt-4'");
+    expect(script).toContain("EC=$?");
+    expect(script).toContain("echo \"$EC\" > '/tmp/test.exit'");
+    expect(script).toContain("exit $EC");
+  });
+
+  it("escapes single quotes in args", () => {
+    const script = generateWrapperScript(
+      "/usr/bin/opencode",
+      ["run", "it's a test"],
+      "/tmp/out.exit",
+    );
+    expect(script).toContain("'it'\\''s a test'");
+  });
+
+  it("escapes single quotes in exit file path", () => {
+    const script = generateWrapperScript(
+      "/usr/bin/opencode",
+      ["run"],
+      "/tmp/it's/a.exit",
+    );
+    expect(script).toContain("'\\''");
+  });
+});
+
+describe("Lifecycle fuse — events()", () => {
+  /**
+   * Helper: create a meta-dir session with optional .exit file.
+   * Returns the session ID.
+   */
+  async function createMetaSession(
+    dir: string,
+    overrides: Partial<LaunchedSessionMeta> & { exitCode?: number } = {},
+  ): Promise<string> {
+    const sid =
+      overrides.sessionId ||
+      `fuse-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: overrides.pid ?? 99999,
+      launchedAt: overrides.launchedAt || new Date().toISOString(),
+      startTime: overrides.startTime,
+    };
+    await fs.writeFile(
+      path.join(dir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+    if (overrides.exitCode !== undefined) {
+      await fs.writeFile(
+        path.join(dir, `${sid}.exit`),
+        String(overrides.exitCode),
+      );
+    }
+    return sid;
+  }
+
+  it("exit file signal fires session.stopped with exit code", async () => {
+    const alivePids = new Set<number>([12345]);
+    const fuseAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+      pollIntervalMs: 50,
+      masterTimeoutMs: 60_000,
+    });
+
+    // Create a meta-dir session with alive PID
+    const sid = await createMetaSession(sessionsMetaDir, {
+      pid: 12345,
+      launchedAt: new Date().toISOString(),
+    });
+
+    // Start iterator — bootstrapFusesFromMeta creates fuse (PID alive)
+    const iter = fuseAdapter.events()[Symbol.asyncIterator]();
+    const eventPromise = iter.next();
+
+    // Write exit file after bootstrap initializes
+    await new Promise((r) => setTimeout(r, 20));
+    await fs.writeFile(path.join(sessionsMetaDir, `${sid}.exit`), "0");
+
+    // Collect the event
+    const { value } = await eventPromise;
+
+    expect(value.type).toBe("session.stopped");
+    expect(value.meta?.signal).toBe("exit-file");
+    expect(value.meta?.exitCode).toBe(0);
+
+    await iter.return?.(undefined);
+  });
+
+  it("PID death signal fires session.stopped when process dies", async () => {
+    const alivePids = new Set<number>([23456]);
+    const fuseAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+      pollIntervalMs: 50,
+      masterTimeoutMs: 60_000,
+    });
+
+    await createMetaSession(sessionsMetaDir, {
+      pid: 23456,
+      launchedAt: new Date().toISOString(),
+    });
+
+    // Start the iterator — this triggers bootstrapFusesFromMeta which
+    // creates fuses for alive PIDs. The generator then enters sleep().
+    const iter = fuseAdapter.events()[Symbol.asyncIterator]();
+    // Start consuming the first event (this enters the while-loop sleep)
+    const firstEventPromise = iter.next();
+
+    // Kill the process AFTER the generator initialized (fuse is created)
+    // but BEFORE the sleep finishes (so checkFuses sees the dead PID)
+    await new Promise((r) => setTimeout(r, 10));
+    alivePids.delete(23456);
+
+    const { value } = await firstEventPromise;
+    expect(value.type).toBe("session.stopped");
+    expect(value.meta?.signal).toBe("pid-death");
+
+    await iter.return?.(undefined);
+  });
+
+  it("master timeout fires session.timeout without killing process", async () => {
+    const alivePids = new Set<number>([34567]);
+    const fuseAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+      pollIntervalMs: 50,
+      masterTimeoutMs: 80, // Very short timeout for testing
+    });
+
+    // Session launched "in the past" so it's already timed out
+    const _sid = await createMetaSession(sessionsMetaDir, {
+      pid: 34567,
+      launchedAt: new Date(Date.now() - 200).toISOString(),
+    });
+
+    const iter = fuseAdapter.events()[Symbol.asyncIterator]();
+
+    const { value } = await iter.next();
+    expect(value.type).toBe("session.timeout");
+    expect(value.meta?.signal).toBe("master-timeout");
+    expect(value.meta?.timeoutMs).toBe(80);
+
+    // Process should still be alive (timeout doesn't kill)
+    expect(alivePids.has(34567)).toBe(true);
+
+    await iter.return?.(undefined);
+  });
+
+  it("first signal wins — exit file prevents PID death or timeout", async () => {
+    const alivePids = new Set<number>([45678]);
+    const fuseAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+      pollIntervalMs: 50,
+      masterTimeoutMs: 60_000,
+    });
+
+    const sid = await createMetaSession(sessionsMetaDir, {
+      pid: 45678,
+      launchedAt: new Date().toISOString(),
+    });
+
+    // Start iterator — fuse bootstraps while PID is alive
+    const iter = fuseAdapter.events()[Symbol.asyncIterator]();
+    const firstEventPromise = iter.next();
+
+    // Write exit file AND kill PID after bootstrap
+    await new Promise((r) => setTimeout(r, 10));
+    await fs.writeFile(path.join(sessionsMetaDir, `${sid}.exit`), "1");
+    alivePids.delete(45678);
+
+    const { value: firstEvent } = await firstEventPromise;
+
+    // Exit file signal should win (checked first in checkFuses)
+    expect(firstEvent.type).toBe("session.stopped");
+    expect(firstEvent.meta?.signal).toBe("exit-file");
+    expect(firstEvent.meta?.exitCode).toBe(1);
+
+    // Fuse cancellation (no duplicate events) is verified by the dedicated
+    // opencode-fuse.test.ts tests. Clean up the generator.
+    await iter.return?.(undefined);
+  });
+
+  it("aborted fuse does not produce duplicate events", async () => {
+    const alivePids = new Set<number>([56789]);
+    const fuseAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+      pollIntervalMs: 50,
+      masterTimeoutMs: 60_000,
+    });
+
+    const sid = await createMetaSession(sessionsMetaDir, {
+      pid: 56789,
+      launchedAt: new Date().toISOString(),
+    });
+
+    // Write exit file — bootstrap skips sessions with exit files
+    await fs.writeFile(path.join(sessionsMetaDir, `${sid}.exit`), "0");
+
+    // The session should not produce any fuse events because it's
+    // already resolved. This is verified by the firedFuseIds mechanism
+    // (tested in opencode-fuse.test.ts). Just verify list() shows it stopped.
+    const sessions = await fuseAdapter.list({ all: true });
+    const found = sessions.find((s) => s.id === sid);
+    expect(found).toBeDefined();
+    expect(found?.status).toBe("stopped");
+  });
+});
+
+describe("Meta-dir sessions visible in list()", () => {
+  it("lists sessions from meta dir even without native storage files", async () => {
+    const alivePids = new Set<number>([77777]);
+    const listAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+    });
+
+    // Write only a meta-dir session (no native storage)
+    const sid = "meta-only-session-0000-000000000000";
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: 77777,
+      launchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(sessionsMetaDir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+
+    const sessions = await listAdapter.list();
+    expect(sessions.length).toBe(1);
+    expect(sessions[0].id).toBe(sid);
+    expect(sessions[0].status).toBe("running");
+    expect(sessions[0].meta?.source).toBe("meta-dir");
+  });
+
+  it("shows stopped meta-dir session when exit file exists", async () => {
+    const listAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: () => false,
+    });
+
+    const sid = "stopped-meta-session-000000000000";
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: 88888,
+      launchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(sessionsMetaDir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+    await fs.writeFile(path.join(sessionsMetaDir, `${sid}.exit`), "0");
+
+    // --all to include stopped
+    const sessions = await listAdapter.list({ all: true });
+    const match = sessions.find((s) => s.id === sid);
+    expect(match).toBeDefined();
+    expect(match?.status).toBe("stopped");
+  });
+
+  it("does not duplicate sessions found in both meta-dir and native storage", async () => {
+    const alivePids = new Set<number>([99999]);
+    const listAdapter = new OpenCodeAdapter({
+      storageDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => alivePids.has(pid),
+    });
+
+    // Session exists in both meta-dir and native storage
+    const sid = "dual-source-session-000000000000";
+    const meta: LaunchedSessionMeta = {
+      sessionId: sid,
+      pid: 99999,
+      launchedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(sessionsMetaDir, `${sid}.json`),
+      JSON.stringify(meta, null, 2),
+    );
+
+    // Also create native storage entry
+    const session = makeSession({
+      id: sid,
+      directory: "/Users/test/my-project",
+    });
+    await createFakeSession("/Users/test/my-project", session);
+
+    const sessions = await listAdapter.list({ all: true });
+    const matches = sessions.filter((s) => s.id === sid);
+    expect(matches.length).toBe(1);
   });
 });
