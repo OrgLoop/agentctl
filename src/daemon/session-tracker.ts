@@ -3,12 +3,15 @@ import type {
   AgentSession,
   DiscoveredSession,
 } from "../core/types.js";
+import type { FuseEngine } from "./fuse-engine.js";
 import type { SessionRecord, StateManager } from "./state.js";
 
 export interface SessionTrackerOpts {
   adapters: Record<string, AgentAdapter>;
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
+  /** Optional fuse engine reference — sessions with active fuses won't be marked stopped */
+  fuseEngine?: FuseEngine;
 }
 
 /**
@@ -33,12 +36,14 @@ export class SessionTracker {
   private state: StateManager;
   private adapters: Record<string, AgentAdapter>;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private fuseEngine?: FuseEngine;
   private cleanupHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
     this.adapters = opts.adapters;
     this.isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
+    this.fuseEngine = opts.fuseEngine;
   }
 
   /**
@@ -148,6 +153,20 @@ export class SessionTracker {
         // Still within grace period — include as-is in results
         sessions.push(record);
         continue;
+      }
+
+      // Fuse guard: if the fuse engine has an active fuse for this session
+      // AND the PID is alive, the session is still running — the adapter
+      // just can't see it (e.g. opencode doesn't persist running sessions).
+      if (record.pid && this.isProcessAlive(record.pid)) {
+        const hasActiveFuse =
+          this.fuseEngine?.listActive().some((f) => f.sessionId === id) ??
+          false;
+        if (hasActiveFuse) {
+          // Fuse is tracking this session and PID is alive — keep running
+          sessions.push(record);
+          continue;
+        }
       }
 
       // Session disappeared from adapter results — mark stopped
