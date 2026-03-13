@@ -192,7 +192,6 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   /** Session IDs that have already fired a fuse event — prevents re-emission by legacy poll */
   private readonly firedFuseIds = new Set<string>();
-  private readonly pendingFuseEvents: LifecycleEvent[] = [];
 
   constructor(opts?: OpenCodeAdapterOpts) {
     this.storageDir = opts?.storageDir || DEFAULT_STORAGE_DIR;
