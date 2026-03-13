@@ -1467,75 +1467,11 @@ describe("OpenCodeAdapter", () => {
 });
 
 // ================================================================
-// Lifecycle fuse tests
+// Lifecycle fuse tests → see opencode-fuse.test.ts
+// Wrapper script tests → see opencode-launch.test.ts
 // ================================================================
 
-describe("generateWrapperScript", () => {
-  it("produces a shell script that captures exit code", () => {
-    const script = generateWrapperScript(
-      "/usr/bin/opencode",
-      ["run", "--model", "gpt-4"],
-      "/tmp/test.exit",
-    );
-    expect(script).toContain("#!/bin/sh");
-    expect(script).toContain("/usr/bin/opencode");
-    expect(script).toContain("'run' '--model' 'gpt-4'");
-    expect(script).toContain("EC=$?");
-    expect(script).toContain("echo \"$EC\" > '/tmp/test.exit'");
-    expect(script).toContain("exit $EC");
-  });
-
-  it("escapes single quotes in args", () => {
-    const script = generateWrapperScript(
-      "/usr/bin/opencode",
-      ["run", "it's a test"],
-      "/tmp/out.exit",
-    );
-    expect(script).toContain("'it'\\''s a test'");
-  });
-
-  it("escapes single quotes in exit file path", () => {
-    const script = generateWrapperScript(
-      "/usr/bin/opencode",
-      ["run"],
-      "/tmp/it's/a.exit",
-    );
-    expect(script).toContain("'\\''");
-  });
-});
-
-describe("Lifecycle fuse — events()", () => {
-  /**
-   * Helper: create a meta-dir session with optional .exit file.
-   * Returns the session ID.
-   */
-  async function createMetaSession(
-    dir: string,
-    overrides: Partial<LaunchedSessionMeta> & { exitCode?: number } = {},
-  ): Promise<string> {
-    const sid =
-      overrides.sessionId ||
-      `fuse-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const meta: LaunchedSessionMeta = {
-      sessionId: sid,
-      pid: overrides.pid ?? 99999,
-      launchedAt: overrides.launchedAt || new Date().toISOString(),
-      startTime: overrides.startTime,
-    };
-    await fs.writeFile(
-      path.join(dir, `${sid}.json`),
-      JSON.stringify(meta, null, 2),
-    );
-    if (overrides.exitCode !== undefined) {
-      await fs.writeFile(
-        path.join(dir, `${sid}.exit`),
-        String(overrides.exitCode),
-      );
-    }
-    return sid;
-  }
-
-  it("exit file signal fires session.stopped with exit code", async () => {
+describe("Meta-dir sessions visible in list()", () => {
     const alivePids = new Set<number>([12345]);
     const fuseAdapter = new OpenCodeAdapter({
       storageDir,
