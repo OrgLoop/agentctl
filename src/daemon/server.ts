@@ -116,7 +116,10 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     defaultDurationMs: 10 * 60 * 1000,
     emitter,
   });
-  const sessionTracker = new SessionTracker(state, { adapters });
+  const sessionTracker = new SessionTracker(state, {
+    adapters,
+    fuseEngine,
+  });
   const metrics = new MetricsRegistry(lockManager, fuseEngine);
 
   // Wire up events
@@ -684,6 +687,19 @@ function createRequestHandler(ctx: HandlerContext) {
           ctx.lockManager.autoLock(cwd, session.pid, session.id);
         }
 
+        // Set a lifecycle fuse so reconcileAndEnrich won't falsely mark this
+        // session as stopped when the adapter's list() doesn't return it (#146).
+        // The fuse acts as a marker; reconcileAndEnrich checks fuse + PID liveness.
+        if (cwd && session.pid) {
+          const LIFECYCLE_FUSE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+          ctx.fuseEngine.setFuse({
+            directory: cwd,
+            sessionId: session.id,
+            ttlMs: LIFECYCLE_FUSE_TTL_MS,
+            label: `lifecycle:${adapterName}:${session.id.slice(0, 8)}`,
+          });
+        }
+
         return record;
       }
 
@@ -710,6 +726,11 @@ function createRequestHandler(ctx: HandlerContext) {
           ctx.lockManager.autoUnlockByPid(launchRecord.pid);
         } else {
           ctx.lockManager.autoUnlock(sessionId);
+        }
+
+        // Cancel lifecycle fuse (#146)
+        if (launchRecord?.cwd) {
+          ctx.fuseEngine.cancelFuse(launchRecord.cwd);
         }
 
         // Mark stopped in launch metadata

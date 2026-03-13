@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, DiscoveredSession } from "../core/types.js";
+import { FuseEngine } from "./fuse-engine.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
@@ -296,6 +297,143 @@ describe("SessionTracker", () => {
 
       // Should not try to stop it again
       expect(stoppedLaunchIds).not.toContain("already-stopped");
+    });
+
+    it("keeps session running when fuse is active and PID is alive (#146)", () => {
+      // Create a tracker with fuse engine and live PID
+      const fuseEngine = new FuseEngine(state, { defaultDurationMs: 60_000 });
+      const fuseTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+        fuseEngine,
+      });
+
+      // Session launched 2+ minutes ago (past grace period)
+      fuseTracker.track(
+        makeSession({
+          id: "fused-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 12345,
+          cwd: "/tmp/fuse-test",
+        }),
+        "opencode",
+      );
+
+      // Set a lifecycle fuse for this session
+      fuseEngine.setFuse({
+        directory: "/tmp/fuse-test",
+        sessionId: "fused-session",
+        ttlMs: 4 * 60 * 60 * 1000,
+        label: "lifecycle:opencode:fused-se",
+      });
+
+      // Adapter returns empty (opencode doesn't persist running sessions)
+      const { sessions, stoppedLaunchIds } = fuseTracker.reconcileAndEnrich(
+        [],
+        new Set(["opencode"]),
+      );
+
+      // Session must NOT be marked stopped — fuse + PID alive protects it
+      expect(stoppedLaunchIds).not.toContain("fused-session");
+      expect(sessions.map((s) => s.id)).toContain("fused-session");
+      expect(state.getSession("fused-session")?.status).toBe("running");
+
+      fuseEngine.shutdown();
+    });
+
+    it("marks session stopped when fuse is active but PID is dead (#146)", () => {
+      const fuseEngine = new FuseEngine(state, { defaultDurationMs: 60_000 });
+      const deadPidTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => false, // PID is dead
+        fuseEngine,
+      });
+
+      deadPidTracker.track(
+        makeSession({
+          id: "dead-pid-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 99999,
+          cwd: "/tmp/dead-test",
+        }),
+        "opencode",
+      );
+
+      // Fuse exists but PID is dead — should still be marked stopped
+      fuseEngine.setFuse({
+        directory: "/tmp/dead-test",
+        sessionId: "dead-pid-session",
+        ttlMs: 4 * 60 * 60 * 1000,
+      });
+
+      const { stoppedLaunchIds } = deadPidTracker.reconcileAndEnrich(
+        [],
+        new Set(["opencode"]),
+      );
+
+      expect(stoppedLaunchIds).toContain("dead-pid-session");
+      expect(state.getSession("dead-pid-session")?.status).toBe("stopped");
+
+      fuseEngine.shutdown();
+    });
+
+    it("marks session stopped without fuse even if PID is alive (#146)", () => {
+      // No fuse engine — falls back to original behavior
+      const noFuseTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+      });
+
+      noFuseTracker.track(
+        makeSession({
+          id: "no-fuse-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 12345,
+        }),
+        "claude-code",
+      );
+
+      const { stoppedLaunchIds } = noFuseTracker.reconcileAndEnrich(
+        [],
+        new Set(["claude-code"]),
+      );
+
+      // Without a fuse engine, session should be marked stopped (existing behavior)
+      expect(stoppedLaunchIds).toContain("no-fuse-session");
+      expect(state.getSession("no-fuse-session")?.status).toBe("stopped");
+    });
+
+    it("follows grace period logic when no fuse exists (#146)", () => {
+      const fuseEngine = new FuseEngine(state, { defaultDurationMs: 60_000 });
+      const fuseTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+        fuseEngine,
+      });
+
+      // Session past grace period, PID alive, but NO fuse set
+      fuseTracker.track(
+        makeSession({
+          id: "no-fuse-old",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 12345,
+        }),
+        "opencode",
+      );
+
+      const { stoppedLaunchIds } = fuseTracker.reconcileAndEnrich(
+        [],
+        new Set(["opencode"]),
+      );
+
+      // No fuse for this session — should be marked stopped
+      expect(stoppedLaunchIds).toContain("no-fuse-old");
+
+      fuseEngine.shutdown();
     });
   });
 
