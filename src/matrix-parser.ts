@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import YAML from "yaml";
 import type { AdapterSlot } from "./launch-orchestrator.js";
 
@@ -91,6 +92,14 @@ export function expandMatrix(matrix: MatrixFile): AdapterSlot[] {
   }
 
   return slots;
+}
+
+/** Expand leading ~ to the user's home directory */
+export function expandTildePath(p: string): string {
+  if (p.startsWith("~/") || p === "~") {
+    return os.homedir() + p.slice(1);
+  }
+  return p;
 }
 
 /** Normalize a value to an array (handles string | string[] | undefined) */

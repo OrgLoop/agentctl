@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   expandMatrix,
+  expandTildePath,
   type MatrixFile,
   parseMatrixFile,
 } from "./matrix-parser.js";
@@ -130,6 +131,30 @@ matrix:
     await expect(
       parseMatrixFile(path.join(tmpDir, "nope.yaml")),
     ).rejects.toThrow();
+  });
+});
+
+describe("expandTildePath", () => {
+  it("expands ~/path to homedir/path", () => {
+    const result = expandTildePath("~/code/mono");
+    expect(result).toBe(path.join(os.homedir(), "code/mono"));
+  });
+
+  it("expands bare ~ to homedir", () => {
+    const result = expandTildePath("~");
+    expect(result).toBe(os.homedir());
+  });
+
+  it("leaves absolute paths unchanged", () => {
+    expect(expandTildePath("/usr/local/bin")).toBe("/usr/local/bin");
+  });
+
+  it("leaves relative paths unchanged", () => {
+    expect(expandTildePath("./foo/bar")).toBe("./foo/bar");
+  });
+
+  it("does not expand ~ in the middle of a path", () => {
+    expect(expandTildePath("/home/~user")).toBe("/home/~user");
   });
 });
 

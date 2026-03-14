@@ -70,6 +70,28 @@ describe("SessionTracker", () => {
 
       expect(state.getSession("test-session-1")).toBeDefined();
     });
+
+    it("preserves group, pid, and model for matrix-launched sessions", () => {
+      const session = makeSession({
+        id: "matrix-session-1",
+        pid: 12345,
+        model: "claude-opus-4-6",
+        group: "g-abc123",
+        prompt: "implement caching",
+      });
+      const record = tracker.track(session, "opencode");
+
+      expect(record.group).toBe("g-abc123");
+      expect(record.pid).toBe(12345);
+      expect(record.model).toBe("claude-opus-4-6");
+      expect(record.prompt).toBe("implement caching");
+      expect(record.adapter).toBe("opencode");
+
+      // Verify it's retrievable from state
+      const fromState = state.getSession("matrix-session-1");
+      expect(fromState).toBeDefined();
+      expect(fromState?.group).toBe("g-abc123");
+    });
   });
 
   describe("getSession", () => {

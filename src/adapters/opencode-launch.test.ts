@@ -84,6 +84,22 @@ describe("generateWrapperScript", () => {
     );
     expect(script).toContain("'it'\\''s a bug'");
   });
+
+  it("detects fast exits (< 2s) and overrides exit code 0 to 1", () => {
+    const script = generateWrapperScript(
+      "/usr/local/bin/opencode",
+      ["run", "--", "test"],
+      "/tmp/test.exit",
+    );
+    // Wrapper should record start time and check elapsed
+    expect(script).toContain("START=$(date +%s)");
+    expect(script).toContain("END=$(date +%s)");
+    expect(script).toContain("ELAPSED=$((END - START))");
+    // If exit code is 0 and runtime < threshold, override to 1
+    expect(script).toMatch(
+      /if \[ "\$EC" -eq 0 \] && \[ "\$ELAPSED" -lt \d+ \]; then EC=1; fi/,
+    );
+  });
 });
 
 describe("OpenCodeAdapter launch", () => {
