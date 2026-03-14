@@ -35,7 +35,11 @@ import {
   orchestrateLaunch,
   parseAdapterSlots,
 } from "./launch-orchestrator.js";
-import { expandMatrix, parseMatrixFile } from "./matrix-parser.js";
+import {
+  expandMatrix,
+  expandTildePath,
+  parseMatrixFile,
+} from "./matrix-parser.js";
 import { loadConfig } from "./utils/config.js";
 import { shortId } from "./utils/display.js";
 import { createWorktree, type WorktreeInfo } from "./worktree.js";
@@ -605,7 +609,7 @@ program
         const matrixFile = await parseMatrixFile(opts.matrix);
         slots = expandMatrix(matrixFile);
         // Matrix can override cwd; matrix prompt is used unless CLI -p overrides
-        if (matrixFile.cwd) cwd = path.resolve(matrixFile.cwd);
+        if (matrixFile.cwd) cwd = path.resolve(expandTildePath(matrixFile.cwd));
         if (!opts.prompt && matrixFile.prompt) opts.prompt = matrixFile.prompt;
       } catch (err) {
         console.error(`Failed to parse matrix file: ${(err as Error).message}`);
@@ -678,6 +682,9 @@ program
                   adapter: slotResult.slot.adapter,
                   cwd: slotResult.cwd,
                   group: groupId,
+                  pid: slotResult.pid,
+                  model: slotResult.slot.model,
+                  prompt: opts.prompt,
                 })
                 .catch(() => {
                   // Best effort — session will be picked up by poll

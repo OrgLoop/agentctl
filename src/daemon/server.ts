@@ -703,6 +703,51 @@ function createRequestHandler(ctx: HandlerContext) {
         return record;
       }
 
+      case "session.launch.track": {
+        // Register an externally-launched session (e.g. from matrix/orchestrator)
+        // so it appears in state, gets locks, fuses, webhooks, etc.
+        const id = params.id as string;
+        const adapterName = params.adapter as string;
+        const cwd = params.cwd as string | undefined;
+        const group = params.group as string | undefined;
+        const pid = params.pid as number | undefined;
+        const model = params.model as string | undefined;
+        const prompt = params.prompt as string | undefined;
+
+        const session: import("../core/types.js").AgentSession = {
+          id,
+          adapter: adapterName,
+          status: "running",
+          startedAt: new Date(),
+          cwd,
+          model,
+          prompt: prompt?.slice(0, 200),
+          pid,
+          group,
+          meta: {},
+        };
+
+        const record = ctx.sessionTracker.track(session, adapterName);
+
+        // Auto-lock by PID
+        if (cwd && pid) {
+          ctx.lockManager.autoLock(cwd, pid, id);
+        }
+
+        // Set lifecycle fuse (same as session.launch)
+        if (cwd && pid) {
+          const LIFECYCLE_FUSE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+          ctx.fuseEngine.setFuse({
+            directory: cwd,
+            sessionId: id,
+            ttlMs: LIFECYCLE_FUSE_TTL_MS,
+            label: `lifecycle:${adapterName}:${id.slice(0, 8)}`,
+          });
+        }
+
+        return record;
+      }
+
       case "session.stop": {
         const id = params.id as string;
         const launchRecord = ctx.sessionTracker.getSession(id);

@@ -148,6 +148,11 @@ export function computeProjectHash(directory: string): string {
  * Generate a wrapper shell script that runs opencode and writes exit code to a file.
  * This gives us immediate exit code capture — the primary signal in the fuse.
  */
+/** Minimum runtime (seconds) for a session to be considered successful.
+ *  Exits faster than this with code 0 are treated as failures (e.g.
+ *  ProviderModelNotFoundError which opencode exits 0 on). */
+const MIN_RUNTIME_SECONDS = 2;
+
 export function generateWrapperScript(
   opencodeBin: string,
   args: string[],
@@ -157,11 +162,18 @@ export function generateWrapperScript(
   const escapedArgs = args
     .map((a) => `'${a.replace(/'/g, "'\\''")}'`)
     .join(" ");
+  const escapedExitFile = exitFilePath.replace(/'/g, "'\\''");
   return [
     "#!/bin/sh",
+    `START=$(date +%s)`,
     `${opencodeBin} ${escapedArgs}`,
     `EC=$?`,
-    `echo "$EC" > '${exitFilePath.replace(/'/g, "'\\''")}'`,
+    `END=$(date +%s)`,
+    `ELAPSED=$((END - START))`,
+    // If process exited 0 but ran for less than MIN_RUNTIME_SECONDS,
+    // treat it as a failure — likely a startup error (e.g. model not found).
+    `if [ "$EC" -eq 0 ] && [ "$ELAPSED" -lt ${MIN_RUNTIME_SECONDS} ]; then EC=1; fi`,
+    `echo "$EC" > '${escapedExitFile}'`,
     `exit $EC`,
   ].join("\n");
 }
