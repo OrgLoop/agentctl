@@ -567,6 +567,10 @@ program
   )
   .option("--branch <name>", "Branch name for --worktree")
   .option(
+    "--base-branch <name>",
+    "Base branch for worktree (default: main). Fetches origin/<base-branch> as start point",
+  )
+  .option(
     "--adapter <name>",
     "Adapter to launch (repeatable for parallel launch)",
     collectAdapter,
@@ -671,6 +675,7 @@ program
           cwd,
           hooks,
           adapters,
+          baseBranch: opts.baseBranch,
           callbackSessionKey,
           callbackAgentId,
           onSessionLaunched: (slotResult) => {
@@ -735,6 +740,7 @@ program
         worktreeInfo = await createWorktree({
           repo: opts.worktree,
           branch: opts.branch,
+          baseBranch: opts.baseBranch,
         });
         cwd = worktreeInfo.path;
         console.log(`Worktree created: ${worktreeInfo.path}`);

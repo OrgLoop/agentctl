@@ -128,6 +128,86 @@ describe("createWorktree", () => {
   });
 });
 
+describe("createWorktree — baseBranch", () => {
+  let remoteDir: string;
+
+  beforeEach(async () => {
+    // Create a bare remote repo and push initial commit
+    remoteDir = path.join(tmpDir, "remote.git");
+    await execFileAsync("git", ["clone", "--bare", repoDir, remoteDir]);
+    // Add the remote to our working repo
+    await execFileAsync("git", ["remote", "add", "origin", remoteDir], {
+      cwd: repoDir,
+    });
+    // Determine the default branch name and push it
+    const { stdout: branchOut } = await execFileAsync(
+      "git",
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      { cwd: repoDir },
+    );
+    const defaultBranch = branchOut.trim();
+    await execFileAsync("git", ["push", "origin", defaultBranch], {
+      cwd: repoDir,
+    });
+  });
+
+  it("creates worktree from a specified base branch", async () => {
+    // Create a base branch with unique content and push it
+    await execFileAsync("git", ["checkout", "-b", "research/ENG-1234"], {
+      cwd: repoDir,
+    });
+    await fs.writeFile(
+      path.join(repoDir, "spec.md"),
+      "# Research spec artifact",
+    );
+    await execFileAsync("git", ["add", "."], { cwd: repoDir });
+    await execFileAsync("git", ["commit", "-m", "add spec"], { cwd: repoDir });
+    await execFileAsync("git", ["push", "origin", "research/ENG-1234"], {
+      cwd: repoDir,
+    });
+    // Go back to the default branch so the worktree isn't on the base branch
+    await execFileAsync("git", ["checkout", "-"], { cwd: repoDir });
+
+    const result = await createWorktree({
+      repo: repoDir,
+      branch: "auto/ENG-1234-kimi",
+      baseBranch: "research/ENG-1234",
+    });
+
+    expect(result.branch).toBe("auto/ENG-1234-kimi");
+
+    // The worktree should contain the file from the base branch
+    const specContent = await fs.readFile(
+      path.join(result.path, "spec.md"),
+      "utf-8",
+    );
+    expect(specContent).toBe("# Research spec artifact");
+  });
+
+  it("falls back to HEAD when baseBranch is not specified", async () => {
+    const result = await createWorktree({
+      repo: repoDir,
+      branch: "feature/no-base",
+    });
+
+    expect(result.branch).toBe("feature/no-base");
+    // Should not contain spec.md (only README.md from initial commit)
+    const files = await fs.readdir(result.path);
+    expect(files).toContain("README.md");
+    expect(files).not.toContain("spec.md");
+  });
+
+  it("throws a clear error for invalid base branch", async () => {
+    await expect(
+      createWorktree({
+        repo: repoDir,
+        branch: "feature/bad-base",
+        baseBranch: "nonexistent/branch",
+      }),
+    ).rejects.toThrow("Failed to fetch base branch: origin/nonexistent/branch");
+  });
+});
+
 describe("removeWorktree", () => {
   it("removes a worktree", async () => {
     const wt = await createWorktree({

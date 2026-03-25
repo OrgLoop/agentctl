@@ -158,6 +158,30 @@ describe("expandTildePath", () => {
   });
 });
 
+describe("parseMatrixFile — base_branch", () => {
+  it("parses base_branch from matrix entries", async () => {
+    const filePath = path.join(tmpDir, "matrix.yaml");
+    await fs.writeFile(
+      filePath,
+      `
+prompt: "Implement feature"
+matrix:
+  - adapter: opencode
+    model: ohm/moonshotai/Kimi-K2.5
+    branch: auto/ENG-1234-kimi
+    base_branch: research/ENG-1234
+  - adapter: claude-code
+`,
+    );
+
+    const result = await parseMatrixFile(filePath);
+    expect(result.matrix[0].base_branch).toBe("research/ENG-1234");
+    expect(result.matrix[0].branch).toBe("auto/ENG-1234-kimi");
+    expect(result.matrix[1].base_branch).toBeUndefined();
+    expect(result.matrix[1].branch).toBeUndefined();
+  });
+});
+
 describe("expandMatrix", () => {
   it("expands simple entries to single slots", () => {
     const matrix: MatrixFile = {
@@ -214,5 +238,49 @@ describe("expandMatrix", () => {
     expect(slots[0]).toEqual({ adapter: "claude-code", model: "opus" });
     expect(slots[3]).toEqual({ adapter: "codex", model: "gpt-5" });
     expect(slots[5]).toEqual({ adapter: "pi" });
+  });
+
+  it("propagates base_branch to expanded slots", () => {
+    const matrix: MatrixFile = {
+      prompt: "test",
+      matrix: [
+        {
+          adapter: "opencode",
+          model: "kimi",
+          branch: "auto/ENG-1234-kimi",
+          base_branch: "research/ENG-1234",
+        },
+        { adapter: "claude-code" },
+      ],
+    };
+
+    const slots = expandMatrix(matrix);
+    expect(slots[0]).toEqual({
+      adapter: "opencode",
+      model: "kimi",
+      branch: "auto/ENG-1234-kimi",
+      baseBranch: "research/ENG-1234",
+    });
+    // Entry without base_branch should not have it
+    expect(slots[1]).toEqual({ adapter: "claude-code" });
+    expect(slots[1].baseBranch).toBeUndefined();
+  });
+
+  it("propagates base_branch across array model expansion", () => {
+    const matrix: MatrixFile = {
+      prompt: "test",
+      matrix: [
+        {
+          adapter: "claude-code",
+          model: ["opus", "sonnet"],
+          base_branch: "research/ENG-1234",
+        },
+      ],
+    };
+
+    const slots = expandMatrix(matrix);
+    expect(slots).toHaveLength(2);
+    expect(slots[0].baseBranch).toBe("research/ENG-1234");
+    expect(slots[1].baseBranch).toBe("research/ENG-1234");
   });
 });

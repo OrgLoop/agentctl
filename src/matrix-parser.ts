@@ -9,6 +9,10 @@ import type { AdapterSlot } from "./launch-orchestrator.js";
 export interface MatrixEntry {
   adapter: string;
   model?: string | string[];
+  /** Branch name for this entry's worktree */
+  branch?: string;
+  /** Base branch to create worktree from (default: main) */
+  base_branch?: string;
 }
 
 /** Top-level matrix file schema */
@@ -79,14 +83,18 @@ export function expandMatrix(matrix: MatrixFile): AdapterSlot[] {
 
   for (const entry of matrix.matrix) {
     const models = normalizeToArray(entry.model);
+    // Carry over optional per-entry fields
+    const extra: Partial<AdapterSlot> = {};
+    if (entry.branch) extra.branch = entry.branch;
+    if (entry.base_branch) extra.baseBranch = entry.base_branch;
 
     if (models.length === 0) {
       // No model specified — single slot
-      slots.push({ adapter: entry.adapter });
+      slots.push({ adapter: entry.adapter, ...extra });
     } else {
       // One slot per model
       for (const model of models) {
-        slots.push({ adapter: entry.adapter, model });
+        slots.push({ adapter: entry.adapter, model, ...extra });
       }
     }
   }
