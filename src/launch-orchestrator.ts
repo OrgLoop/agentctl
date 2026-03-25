@@ -10,6 +10,10 @@ import { createWorktree, type WorktreeInfo } from "./worktree.js";
 export interface AdapterSlot {
   adapter: string;
   model?: string;
+  /** Explicit branch name for this slot's worktree */
+  branch?: string;
+  /** Base branch to create worktree from (default: main) */
+  baseBranch?: string;
 }
 
 /** Result of launching one slot within a group */
@@ -43,6 +47,8 @@ export interface OrchestrateOpts {
   onSessionLaunched?: (result: SlotLaunchResult) => void;
   /** Optional: callback when group ID is generated (before launches) */
   onGroupCreated?: (groupId: string) => void;
+  /** Global base branch fallback (slot-level baseBranch takes precedence) */
+  baseBranch?: string;
 }
 
 // --- Group ID generation ---
@@ -175,10 +181,12 @@ export async function orchestrateLaunch(
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i];
     const suffix = suffixes[i];
-    const branch = branchName(groupId, suffix);
+    const branch = slot.branch || branchName(groupId, suffix);
+    const baseBranch = slot.baseBranch || opts.baseBranch;
     const worktree = await createWorktree({
       repo,
       branch,
+      baseBranch,
     });
 
     // The createWorktree function names the path based on repo+branch slug.

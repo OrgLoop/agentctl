@@ -10,6 +10,8 @@ export interface WorktreeCreateOpts {
   repo: string;
   /** Branch name (e.g. charlie/feature-name) */
   branch: string;
+  /** Base branch to create from (e.g. research/ENG-1234). Uses origin/<baseBranch> as start point. */
+  baseBranch?: string;
 }
 
 export interface WorktreeInfo {
@@ -52,6 +54,17 @@ export async function createWorktree(
     throw new Error(`Not a git repository: ${repoResolved}`);
   }
 
+  // If a base branch is specified, fetch it first
+  if (opts.baseBranch) {
+    try {
+      await execFileAsync("git", ["fetch", "origin", opts.baseBranch], {
+        cwd: repoResolved,
+      });
+    } catch {
+      throw new Error(`Failed to fetch base branch: origin/${opts.baseBranch}`);
+    }
+  }
+
   // Check if branch already exists
   let branchExists = false;
   try {
@@ -69,12 +82,13 @@ export async function createWorktree(
       cwd: repoResolved,
     });
   } else {
-    // Branch doesn't exist — create new branch from HEAD
-    await execFileAsync(
-      "git",
-      ["worktree", "add", "-b", opts.branch, worktreePath],
-      { cwd: repoResolved },
-    );
+    // Branch doesn't exist — create new branch, optionally from a base branch
+    const startPoint = opts.baseBranch
+      ? `origin/${opts.baseBranch}`
+      : undefined;
+    const args = ["worktree", "add", "-b", opts.branch, worktreePath];
+    if (startPoint) args.push(startPoint);
+    await execFileAsync("git", args, { cwd: repoResolved });
   }
 
   return { path: worktreePath, branch: opts.branch, repo: repoResolved };
