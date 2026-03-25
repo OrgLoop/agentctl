@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-03-25
+
+feat: support base_branch in matrix YAML and --base-branch CLI flag to branch worktrees off non-main branches (#162)
+
+
 ## [1.9.0] - 2026-03-12
 
 fix: PID-based locks replace session-ID-coupled locks — self-healing, adapter-independent (#115). fix: pending-* entry cleanup — TTL + dead PID removal (#114). fix: LaunchedSessionMeta minimized with 24h TTL auto-cleanup, shared utility across all 5 adapters (#112). fix: session ID consistency — canonical IDs from launch, login failure detection (#134). fix: peek reliability for short-lived sessions via launch log fallback (#135). fix: stuck session detection and cleanup on daemon startup (#122).
