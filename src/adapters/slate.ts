@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -15,12 +15,6 @@ import type {
   StopOpts,
 } from "../core/types.js";
 import { buildSpawnEnv } from "../utils/daemon-env.js";
-import {
-  cleanupPromptFile,
-  isLargePrompt,
-  openPromptFd,
-  writePromptFile,
-} from "../utils/prompt-file.js";
 import { resolveBinaryPath } from "../utils/resolve-binary.js";
 import {
   cleanupExpiredMeta,
@@ -34,6 +28,9 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_SLATE_DIR = path.join(os.homedir(), ".slate");
 
 const STOPPED_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The binary name for Slate CLI (@randomlabs/slate) */
+export const SLATE_BINARY = "slate";
 
 export interface PidInfo {
   pid: number;
@@ -50,35 +47,34 @@ export interface SlateAdapterOpts {
 }
 
 /**
- * Slate streams Claude Code SDK-compatible JSONL via --output-format stream-json.
- * We reuse the same message types.
+ * Extended metadata stored alongside the standard LaunchedSessionMeta.
+ * We store cwd, model, prompt, and logPath since Slate's -q mode in v1.0.15
+ * produces no output, so we track sessions via PID metadata.
  */
-interface JSONLMessage {
-  type: "user" | "assistant" | "error" | string;
-  sessionId?: string;
-  timestamp?: string;
+interface SlateExtendedMeta {
   cwd?: string;
-  version?: string;
-  message?: {
-    role?: string;
-    content?: string | Array<{ type: string; text?: string }>;
-    model?: string;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cache_creation_input_tokens?: number;
-      cache_read_input_tokens?: number;
-    };
-  };
-  error?: string | { message?: string };
+  model?: string;
+  prompt?: string;
+  logPath?: string;
 }
 
 /**
- * Slate adapter — launches Slate with --output-format stream-json and
- * tracks sessions via PID + launch-log files.
+ * Slate adapter — launches and monitors Slate coding agent sessions.
  *
- * Slate's stream-json output is compatible with the Claude Code SDK,
- * so we reuse the same JSONL parsing approach.
+ * Slate is a TUI-based coding agent by Random Labs (@randomlabs/slate).
+ * Key CLI characteristics (v1.0.15):
+ * - Binary: `slate` (npm: @randomlabs/slate)
+ * - Prompt: `-q, --question <text>` to start with an initial question
+ * - Output: `--output-format stream-json` for JSONL output, or `--stream-json`
+ * - Permissions: `--dangerously-set-permissions` or env SLATE_DANGEROUS_SKIP_PERMISSIONS=1
+ * - Workspace: `-w, --workspace <path>` for workspace directories
+ * - Resume: `--resume <session-id>` for specific session, or `-c` for latest
+ * - No --model flag (model configured via slate.json `models.main.default`)
+ *
+ * KNOWN ISSUE: In v1.0.15, `-q` mode produces empty stdout with exit 0.
+ * This appears to be a bug in Slate where non-interactive invocations silently
+ * skip the LLM call. The adapter still launches correctly (process runs),
+ * but stream-json output may be empty. Interactive mode (`slate` with TUI) works.
  */
 export class SlateAdapter implements AgentAdapter {
   readonly id = "slate";
@@ -97,15 +93,13 @@ export class SlateAdapter implements AgentAdapter {
 
   async discover(): Promise<DiscoveredSession[]> {
     cleanupExpiredMeta(this.sessionsMetaDir).catch(() => {});
-
-    const results: DiscoveredSession[] = [];
     const runningPids = await this.getPids();
+    const results: DiscoveredSession[] = [];
 
-    // Discover from persisted session metadata (launched via agentctl)
     try {
       const files = await fs.readdir(this.sessionsMetaDir);
       for (const file of files) {
-        if (!file.endsWith(".json")) continue;
+        if (!file.endsWith(".json") || file.endsWith(".ext.json")) continue;
         try {
           const raw = await fs.readFile(
             path.join(this.sessionsMetaDir, file),
@@ -118,22 +112,22 @@ export class SlateAdapter implements AgentAdapter {
             ? this.isPidAlive(meta.pid, meta.startTime, runningPids)
             : false;
 
-          const logData = meta.logPath
-            ? await this.parseLogFile(meta.logPath)
-            : undefined;
+          const ext = await this.readExtendedMeta(meta.sessionId);
 
           results.push({
             id: meta.sessionId,
             status: isRunning ? "running" : "stopped",
             adapter: this.id,
-            cwd: logData?.cwd,
-            model: logData?.model,
+            cwd: ext?.cwd,
+            model: ext?.model,
             startedAt: meta.launchedAt ? new Date(meta.launchedAt) : undefined,
-            stoppedAt: isRunning ? undefined : new Date(),
+            stoppedAt: isRunning
+              ? undefined
+              : meta.launchedAt
+                ? new Date(meta.launchedAt)
+                : undefined,
             pid: isRunning ? meta.pid : undefined,
-            prompt: logData?.prompt?.slice(0, 200),
-            tokens: logData?.tokens,
-            cost: logData?.cost,
+            prompt: ext?.prompt?.slice(0, 200),
           });
         } catch {
           // skip unreadable files
@@ -141,6 +135,23 @@ export class SlateAdapter implements AgentAdapter {
       }
     } catch {
       // sessionsMetaDir doesn't exist yet
+    }
+
+    // Discover running slate processes not launched by us
+    for (const [pid, info] of runningPids) {
+      const alreadyTracked = results.some(
+        (r) => r.pid === pid && r.status === "running",
+      );
+      if (alreadyTracked) continue;
+
+      results.push({
+        id: `slate-pid-${pid}`,
+        status: "running",
+        adapter: this.id,
+        cwd: info.cwd || undefined,
+        pid,
+        nativeMetadata: { args: info.args },
+      });
     }
 
     return results;
@@ -156,41 +167,35 @@ export class SlateAdapter implements AgentAdapter {
 
   async list(opts?: ListOpts): Promise<AgentSession[]> {
     const discovered = await this.discover();
-    const sessions: AgentSession[] = [];
+    let sessions: AgentSession[] = discovered.map((d) => ({
+      id: d.id,
+      adapter: d.adapter,
+      status: d.status === "running" ? "running" : "stopped",
+      startedAt: d.startedAt || new Date(),
+      stoppedAt: d.stoppedAt,
+      cwd: d.cwd,
+      model: d.model,
+      prompt: d.prompt,
+      pid: d.pid,
+      meta: d.nativeMetadata || {},
+    }));
 
-    for (const disc of discovered) {
-      const session: AgentSession = {
-        id: disc.id,
-        adapter: this.id,
-        status: disc.status === "running" ? "running" : "stopped",
-        startedAt: disc.startedAt || new Date(),
-        stoppedAt: disc.stoppedAt,
-        cwd: disc.cwd,
-        model: disc.model,
-        prompt: disc.prompt,
-        tokens: disc.tokens,
-        cost: disc.cost,
-        pid: disc.pid,
-        meta: {},
-      };
+    if (opts?.status) {
+      sessions = sessions.filter((s) => s.status === opts.status);
+    } else if (!opts?.all) {
+      sessions = sessions.filter(
+        (s) => s.status === "running" || s.status === "idle",
+      );
+    }
 
-      if (opts?.status && session.status !== opts.status) continue;
-
-      if (!opts?.all && session.status === "stopped") {
-        const age = Date.now() - session.startedAt.getTime();
-        if (age > STOPPED_SESSION_MAX_AGE_MS) continue;
-      }
-
-      if (
-        !opts?.all &&
-        !opts?.status &&
-        session.status !== "running" &&
-        session.status !== "idle"
-      ) {
-        continue;
-      }
-
-      sessions.push(session);
+    if (!opts?.all) {
+      sessions = sessions.filter((s) => {
+        if (s.status === "stopped") {
+          const age = Date.now() - s.startedAt.getTime();
+          return age <= STOPPED_SESSION_MAX_AGE_MS;
+        }
+        return true;
+      });
     }
 
     sessions.sort((a, b) => {
@@ -203,30 +208,28 @@ export class SlateAdapter implements AgentAdapter {
   }
 
   async peek(sessionId: string, opts?: PeekOpts): Promise<string> {
-    const lines = opts?.lines ?? 20;
+    const n = opts?.lines ?? 20;
 
-    // Find the log file for this session
-    const logPath = await this.getLogPathForSession(sessionId);
-    if (!logPath) throw new Error(`Session not found: ${sessionId}`);
-
-    const content = await fs.readFile(logPath, "utf-8");
-    const jsonlLines = content.trim().split("\n");
-
-    const assistantMessages: string[] = [];
-    for (const line of jsonlLines) {
+    const ext = await this.readExtendedMeta(sessionId);
+    if (ext?.logPath) {
       try {
-        const msg = JSON.parse(line) as JSONLMessage;
-        if (msg.type === "assistant" && msg.message?.content) {
-          const text = extractTextContent(msg.message.content);
-          if (text) assistantMessages.push(text);
-        }
+        const content = await fs.readFile(ext.logPath, "utf-8");
+        const lines = content.trim().split("\n");
+        return lines.slice(-n).join("\n") || "(no output captured)";
       } catch {
-        // skip malformed lines
+        // log file unreadable
       }
     }
 
-    const recent = assistantMessages.slice(-lines);
-    return recent.join("\n---\n");
+    const meta = await readSessionMeta(this.sessionsMetaDir, sessionId);
+    if (!meta) throw new Error(`Session not found: ${sessionId}`);
+
+    return [
+      "(Slate session — output may be empty due to v1.0.15 -q mode bug)",
+      `Session: ${meta.sessionId}`,
+      `PID: ${meta.pid}`,
+      `Launched: ${meta.launchedAt}`,
+    ].join("\n");
   }
 
   async status(sessionId: string): Promise<AgentSession> {
@@ -238,65 +241,35 @@ export class SlateAdapter implements AgentAdapter {
       ? this.isPidAlive(meta.pid, meta.startTime, runningPids)
       : false;
 
-    const logData = meta.logPath
-      ? await this.parseLogFile(meta.logPath)
-      : undefined;
+    const ext = await this.readExtendedMeta(sessionId);
 
     return {
       id: meta.sessionId,
       adapter: this.id,
       status: isRunning ? "running" : "stopped",
-      startedAt: meta.launchedAt ? new Date(meta.launchedAt) : new Date(),
-      stoppedAt: isRunning ? undefined : new Date(),
-      cwd: logData?.cwd,
-      model: logData?.model,
-      prompt: logData?.prompt?.slice(0, 200),
-      tokens: logData?.tokens,
-      cost: logData?.cost,
+      startedAt: new Date(meta.launchedAt),
+      stoppedAt: isRunning ? undefined : new Date(meta.launchedAt),
+      cwd: ext?.cwd,
+      model: ext?.model,
+      prompt: ext?.prompt?.slice(0, 200),
       pid: isRunning ? meta.pid : undefined,
-      meta: { logPath: meta.logPath },
+      meta: { logPath: ext?.logPath },
     };
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
-    const args = [
-      "-q",
-      "--output-format",
-      "stream-json",
-      "--dangerously-set-permissions",
-    ];
-
-    if (opts.cwd) {
-      args.push("--workspace", opts.cwd);
-    }
-
-    if (opts.model) {
-      args.push("--model", opts.model);
-    }
-
-    const useTempFile = isLargePrompt(opts.prompt);
-    let promptFilePath: string | undefined;
-    let promptFd: Awaited<ReturnType<typeof openPromptFd>> | undefined;
-
-    if (useTempFile) {
-      promptFilePath = await writePromptFile(opts.prompt);
-      promptFd = await openPromptFd(promptFilePath);
-    } else {
-      args.push("-p", opts.prompt);
-    }
-
-    const cwd = opts.cwd || process.cwd();
+    const args = buildSlateArgs(opts);
     const env = buildSpawnEnv(opts.env);
+    const cwd = opts.cwd || process.cwd();
 
-    // Write stdout to a log file for session ID extraction and peek
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
     const logPath = path.join(this.sessionsMetaDir, `launch-${Date.now()}.log`);
     const logFd = await fs.open(logPath, "w");
 
-    const child = await spawnWithRetry("slate", args, {
+    const child = await spawnWithRetry(SLATE_BINARY, args, {
       cwd,
       env,
-      stdio: [promptFd ? promptFd.fd : "ignore", logFd.fd, logFd.fd],
+      stdio: ["ignore", logFd.fd, logFd.fd],
       detached: true,
     });
 
@@ -306,33 +279,17 @@ export class SlateAdapter implements AgentAdapter {
     const now = new Date();
 
     await logFd.close();
-    if (promptFd) await promptFd.close();
-    if (promptFilePath) await cleanupPromptFile(promptFilePath);
 
-    // Poll for session ID from stream-json output
-    let resolvedSessionId: string | undefined;
-    if (pid) {
-      const pollResult = await this.pollForSessionId(logPath, pid, 15000);
-      if (pollResult.error) {
-        throw new Error(`Slate launch failed: ${pollResult.error}`);
-      }
-      resolvedSessionId = pollResult.sessionId;
-    }
-
-    const sessionId = resolvedSessionId || crypto.randomUUID();
+    const sessionId = crypto.randomUUID();
 
     if (pid) {
       await writeSessionMeta(this.sessionsMetaDir, { sessionId, pid });
-      // Also store logPath in the meta file for peek fallback
-      const metaPath = path.join(this.sessionsMetaDir, `${sessionId}.json`);
-      try {
-        const raw = await fs.readFile(metaPath, "utf-8");
-        const meta = JSON.parse(raw);
-        meta.logPath = logPath;
-        await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
-      } catch {
-        // meta write failed — non-fatal
-      }
+      await this.writeExtendedMeta(sessionId, {
+        cwd,
+        model: opts.model,
+        prompt: opts.prompt,
+        logPath,
+      });
     }
 
     return {
@@ -354,43 +311,43 @@ export class SlateAdapter implements AgentAdapter {
 
   async stop(sessionId: string, opts?: StopOpts): Promise<void> {
     const meta = await readSessionMeta(this.sessionsMetaDir, sessionId);
-    const pid = meta?.pid;
-    if (!pid) throw new Error(`No running process for session: ${sessionId}`);
+    if (!meta?.pid) {
+      throw new Error(`No running process for session: ${sessionId}`);
+    }
+
+    if (!this.isProcessAlive(meta.pid)) {
+      throw new Error(`Process already dead for session: ${sessionId}`);
+    }
 
     if (opts?.force) {
-      process.kill(pid, "SIGINT");
+      process.kill(meta.pid, "SIGINT");
       await sleep(5000);
       try {
-        process.kill(pid, "SIGKILL");
+        process.kill(meta.pid, "SIGKILL");
       } catch {
         // Already dead
       }
     } else {
-      process.kill(pid, "SIGTERM");
+      process.kill(meta.pid, "SIGTERM");
     }
   }
 
-  async resume(sessionId: string, message: string): Promise<void> {
-    const args = [
-      "-q",
-      "--output-format",
-      "stream-json",
-      "--dangerously-set-permissions",
-      "--resume",
-      sessionId,
-      "-p",
-      message,
-    ];
+  async resume(sessionId: string, _message: string): Promise<void> {
+    // Slate supports --resume <session-id> for specific sessions,
+    // and -c for the latest session in a workspace.
+    const ext = await this.readExtendedMeta(sessionId);
+    const cwd = ext?.cwd || process.cwd();
 
-    const session = await this.status(sessionId).catch(() => null);
-    const cwd = session?.cwd || process.cwd();
-
-    const slatePath = await resolveBinaryPath("slate");
-    const child = spawn(slatePath, args, {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
+    const slatePath = await resolveBinaryPath(SLATE_BINARY);
+    const child = (await import("node:child_process")).spawn(
+      slatePath,
+      ["--resume", sessionId],
+      {
+        cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      },
+    );
 
     child.on("error", (err) => {
       console.error(`[slate] resume spawn error: ${err.message}`);
@@ -435,180 +392,17 @@ export class SlateAdapter implements AgentAdapter {
               session,
               timestamp: new Date(),
             };
-          } else if (prev.status === "running" && session.status === "idle") {
-            yield {
-              type: "session.idle",
-              adapter: this.id,
-              sessionId: id,
-              session,
-              timestamp: new Date(),
-            };
           }
         }
 
         knownSessions = currentMap;
       }
-    } catch {
-      // iterator closed
+    } finally {
+      // Nothing to clean up
     }
   }
 
   // --- Private helpers ---
-
-  private async pollForSessionId(
-    logPath: string,
-    pid: number,
-    timeoutMs: number,
-  ): Promise<{ sessionId?: string; error?: string }> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const content = await fs.readFile(logPath, "utf-8");
-        for (const line of content.split("\n")) {
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line) as JSONLMessage;
-            if (msg.sessionId && typeof msg.sessionId === "string") {
-              return { sessionId: msg.sessionId };
-            }
-            if (msg.type === "error" || msg.error) {
-              const errMsg =
-                typeof msg.error === "string"
-                  ? msg.error
-                  : (msg.error?.message ?? JSON.stringify(msg));
-              return { error: errMsg };
-            }
-          } catch {
-            // Not valid JSON yet — might be raw stderr
-          }
-        }
-      } catch {
-        // File may not exist yet
-      }
-
-      // Check if process is still alive
-      try {
-        process.kill(pid, 0);
-      } catch {
-        // Process died — try one final read
-        return this.readLogForResult(logPath);
-      }
-
-      await sleep(200);
-    }
-    return {};
-  }
-
-  private async readLogForResult(
-    logPath: string,
-  ): Promise<{ sessionId?: string; error?: string }> {
-    try {
-      const content = await fs.readFile(logPath, "utf-8");
-      for (const line of content.split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          const msg = JSON.parse(line) as JSONLMessage;
-          if (msg.sessionId) return { sessionId: msg.sessionId };
-          if (msg.type === "error" || msg.error) {
-            const errMsg =
-              typeof msg.error === "string"
-                ? msg.error
-                : (msg.error?.message ?? JSON.stringify(msg));
-            return { error: errMsg };
-          }
-        } catch {
-          // skip
-        }
-      }
-    } catch {
-      // file unreadable
-    }
-    return {};
-  }
-
-  private async getLogPathForSession(
-    sessionId: string,
-  ): Promise<string | null> {
-    const meta = await readSessionMeta(this.sessionsMetaDir, sessionId);
-    if (meta?.logPath) {
-      try {
-        await fs.access(meta.logPath);
-        return meta.logPath;
-      } catch {
-        // log file gone
-      }
-    }
-
-    // Scan for log files near the launch time
-    if (meta?.launchedAt) {
-      try {
-        const files = await fs.readdir(this.sessionsMetaDir);
-        const launchMs = new Date(meta.launchedAt).getTime();
-        for (const file of files) {
-          if (!file.startsWith("launch-") || !file.endsWith(".log")) continue;
-          const tsStr = file.replace("launch-", "").replace(".log", "");
-          const ts = Number(tsStr);
-          if (!Number.isNaN(ts) && Math.abs(ts - launchMs) < 2000) {
-            return path.join(this.sessionsMetaDir, file);
-          }
-        }
-      } catch {
-        // dir doesn't exist
-      }
-    }
-    return null;
-  }
-
-  private async parseLogFile(logPath: string): Promise<{
-    cwd?: string;
-    model?: string;
-    prompt?: string;
-    tokens?: { in: number; out: number };
-    cost?: number;
-  }> {
-    try {
-      const content = await fs.readFile(logPath, "utf-8");
-      const lines = content.trim().split("\n");
-
-      let cwd: string | undefined;
-      let model: string | undefined;
-      let prompt: string | undefined;
-      let totalIn = 0;
-      let totalOut = 0;
-
-      for (const line of lines) {
-        try {
-          const msg = JSON.parse(line) as JSONLMessage;
-
-          if (msg.cwd) cwd = msg.cwd;
-
-          if (msg.type === "user" && msg.message?.content && !prompt) {
-            prompt = extractTextContent(msg.message.content);
-          }
-
-          if (msg.type === "assistant" && msg.message) {
-            if (msg.message.model) model = msg.message.model;
-            if (msg.message.usage) {
-              totalIn += msg.message.usage.input_tokens || 0;
-              totalOut += msg.message.usage.output_tokens || 0;
-            }
-          }
-        } catch {
-          // skip malformed lines
-        }
-      }
-
-      return {
-        cwd,
-        model,
-        prompt,
-        tokens:
-          totalIn || totalOut ? { in: totalIn, out: totalOut } : undefined,
-      };
-    } catch {
-      return {};
-    }
-  }
 
   private isPidAlive(
     pid: number,
@@ -617,7 +411,6 @@ export class SlateAdapter implements AgentAdapter {
   ): boolean {
     if (!this.isProcessAlive(pid)) return false;
 
-    // Cross-check for PID recycling
     if (recordedStartTime) {
       const pidInfo = runningPids.get(pid);
       if (pidInfo?.startTime) {
@@ -635,6 +428,62 @@ export class SlateAdapter implements AgentAdapter {
 
     return true;
   }
+
+  private async writeExtendedMeta(
+    sessionId: string,
+    ext: SlateExtendedMeta,
+  ): Promise<void> {
+    const extPath = path.join(this.sessionsMetaDir, `${sessionId}.ext.json`);
+    await fs.writeFile(extPath, JSON.stringify(ext, null, 2));
+  }
+
+  private async readExtendedMeta(
+    sessionId: string,
+  ): Promise<SlateExtendedMeta | null> {
+    const extPath = path.join(this.sessionsMetaDir, `${sessionId}.ext.json`);
+    try {
+      const raw = await fs.readFile(extPath, "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+}
+
+// --- Exported helpers ---
+
+/**
+ * Build CLI arguments for slate launch.
+ * Exported for testing.
+ *
+ * Slate CLI flags (v1.0.15):
+ * - `-q, --question <text>` — Start with an initial question
+ * - `--output-format stream-json` — JSONL output for scripting
+ * - `--stream-json` — Shorthand for --output-format stream-json
+ * - `--dangerously-set-permissions` — Bypass permission prompts
+ * - `-w, --workspace <path>` — Workspace directory
+ * - `--resume <id>` — Resume a specific session
+ * - `-c, --continue` — Resume latest session in workspace
+ * - No --model flag (model configured via slate.json)
+ */
+export function buildSlateArgs(opts: LaunchOpts): string[] {
+  const args: string[] = [];
+
+  // -q is the question/prompt flag
+  args.push("-q", opts.prompt);
+
+  // Request structured JSONL output for stream parsing
+  args.push("--output-format", "stream-json");
+
+  // Bypass permission prompts for non-interactive use
+  args.push("--dangerously-set-permissions");
+
+  // Set workspace if cwd is provided
+  if (opts.cwd) {
+    args.push("-w", opts.cwd);
+  }
+
+  return args;
 }
 
 // --- Utility functions ---
@@ -648,76 +497,101 @@ function defaultIsProcessAlive(pid: number): boolean {
   }
 }
 
+/** Discover running slate processes via `ps aux` */
 async function getSlatePids(): Promise<Map<number, PidInfo>> {
   const pids = new Map<number, PidInfo>();
 
   try {
     const { stdout } = await execFileAsync("ps", ["aux"]);
 
+    const candidates: Array<{ pid: number; command: string }> = [];
     for (const line of stdout.split("\n")) {
-      if (line.includes("grep")) continue;
+      if (!line.includes("slate") || line.includes("grep")) continue;
 
       const fields = line.trim().split(/\s+/);
       if (fields.length < 11) continue;
       const pid = parseInt(fields[1], 10);
       const command = fields.slice(10).join(" ");
 
-      // Match 'slate' command invocations with flags
-      if (!command.startsWith("slate -") && !command.startsWith("slate --"))
-        continue;
+      // Match slate binary — exclude unrelated processes that happen
+      // to contain "slate" in their path (e.g. node_modules/translate)
+      if (!isSlateCommand(command)) continue;
       if (pid === process.pid) continue;
 
-      let cwd = "";
-      try {
-        const { stdout: lsofOut } = await execFileAsync("/usr/sbin/lsof", [
-          "-p",
-          pid.toString(),
-          "-Fn",
-        ]);
-        const lsofLines = lsofOut.split("\n");
-        for (let i = 0; i < lsofLines.length; i++) {
-          if (lsofLines[i] === "fcwd" && lsofLines[i + 1]?.startsWith("n")) {
-            cwd = lsofLines[i + 1].slice(1);
-            break;
-          }
+      candidates.push({ pid, command });
+    }
+
+    if (candidates.length === 0) return pids;
+
+    const pidList = candidates.map((c) => c.pid);
+
+    // Batch lsof for cwds
+    const cwdMap = new Map<number, string>();
+    try {
+      const { stdout: lsofOut } = await execFileAsync("/usr/sbin/lsof", [
+        "-p",
+        pidList.join(","),
+        "-Fn",
+        "-d",
+        "cwd",
+      ]);
+      let currentPid = 0;
+      for (const lsofLine of lsofOut.split("\n")) {
+        if (lsofLine.startsWith("p")) {
+          currentPid = parseInt(lsofLine.slice(1), 10);
+        } else if (lsofLine.startsWith("n") && currentPid) {
+          cwdMap.set(currentPid, lsofLine.slice(1));
         }
-      } catch {
-        // lsof might fail
       }
+    } catch {
+      // lsof might fail
+    }
 
-      let startTime: string | undefined;
-      try {
-        const { stdout: lstart } = await execFileAsync("ps", [
-          "-p",
-          pid.toString(),
-          "-o",
-          "lstart=",
-        ]);
-        startTime = lstart.trim() || undefined;
-      } catch {
-        // ps might fail
+    // Batch ps for start times
+    const startTimeMap = new Map<number, string>();
+    try {
+      const { stdout: psOut } = await execFileAsync("ps", [
+        "-p",
+        pidList.join(","),
+        "-o",
+        "pid=,lstart=",
+      ]);
+      for (const psLine of psOut.trim().split("\n")) {
+        const trimmed = psLine.trim();
+        if (!trimmed) continue;
+        const match = trimmed.match(/^(\d+)\s+(.+)$/);
+        if (match) {
+          startTimeMap.set(parseInt(match[1], 10), match[2].trim());
+        }
       }
+    } catch {
+      // ps might fail
+    }
 
-      pids.set(pid, { pid, cwd, args: command, startTime });
+    for (const { pid, command } of candidates) {
+      pids.set(pid, {
+        pid,
+        cwd: cwdMap.get(pid) || "",
+        args: command,
+        startTime: startTimeMap.get(pid),
+      });
     }
   } catch {
-    // ps failed
+    // ps failed — return empty
   }
 
   return pids;
 }
 
-function extractTextContent(
-  content: string | Array<{ type: string; text?: string }>,
-): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((b) => b.type === "text" && b.text)
-      .map((b) => b.text as string)
-      .join("\n");
-  }
-  return "";
+/** Check if a ps command string is a slate process */
+function isSlateCommand(command: string): boolean {
+  // Match: "slate -q ...", "slate --question ...", "/path/to/slate ...",
+  // or the native binary "slate-darwin-arm64"
+  return (
+    /\bslate\b/.test(command) &&
+    !command.includes("agentctl") &&
+    !command.includes("translate")
+  );
 }
 
 function sleep(ms: number): Promise<void> {

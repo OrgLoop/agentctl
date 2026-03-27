@@ -2,7 +2,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type PidInfo, SlateAdapter } from "./slate.js";
+import type { LaunchOpts } from "../core/types.js";
+import { buildSlateArgs, type PidInfo, SlateAdapter } from "./slate.js";
 
 let tmpDir: string;
 let slateDir: string;
@@ -27,372 +28,362 @@ afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-// --- Helper to create fake session metadata + log ---
+// --- Helpers ---
 
-interface FakeSessionOpts {
-  sessionId: string;
-  pid?: number;
-  logContent?: string;
-  launchedAt?: string;
-  startTime?: string;
+async function writeSessionMeta(
+  sessionId: string,
+  pid: number,
+  extra?: { startTime?: string; launchedAt?: string },
+) {
+  const meta = {
+    sessionId,
+    pid,
+    startTime: extra?.startTime,
+    launchedAt: extra?.launchedAt || new Date().toISOString(),
+  };
+  await fs.writeFile(
+    path.join(sessionsMetaDir, `${sessionId}.json`),
+    JSON.stringify(meta),
+  );
 }
 
-async function createFakeSession(opts: FakeSessionOpts) {
-  const logPath = path.join(sessionsMetaDir, `launch-${Date.now()}.log`);
-  if (opts.logContent) {
-    await fs.writeFile(logPath, opts.logContent);
-  }
+async function writeExtendedMeta(
+  sessionId: string,
+  ext: { cwd?: string; model?: string; prompt?: string; logPath?: string },
+) {
+  await fs.writeFile(
+    path.join(sessionsMetaDir, `${sessionId}.ext.json`),
+    JSON.stringify(ext),
+  );
+}
 
-  const meta = {
-    sessionId: opts.sessionId,
-    pid: opts.pid || 12345,
-    startTime: opts.startTime || "Thu Mar 12 10:00:00 2026",
-    launchedAt: opts.launchedAt || new Date().toISOString(),
-    logPath,
+// --- buildSlateArgs tests ---
+
+describe("buildSlateArgs", () => {
+  const baseLaunchOpts: LaunchOpts = {
+    adapter: "slate",
+    prompt: "fix the bug",
   };
 
-  await fs.writeFile(
-    path.join(sessionsMetaDir, `${opts.sessionId}.json`),
-    JSON.stringify(meta, null, 2),
-  );
-
-  return { logPath, meta };
-}
-
-/** Build a Claude Code SDK-compatible JSONL log */
-function buildStreamJsonLog(messages: Array<Record<string, unknown>>): string {
-  return messages.map((m) => JSON.stringify(m)).join("\n");
-}
-
-// --- Tests ---
-
-describe("SlateAdapter", () => {
-  it("has correct id", () => {
-    expect(adapter.id).toBe("slate");
+  it("uses -q for the prompt (not -p)", () => {
+    const args = buildSlateArgs(baseLaunchOpts);
+    expect(args).toContain("-q");
+    expect(args).not.toContain("-p");
+    const qIdx = args.indexOf("-q");
+    expect(args[qIdx + 1]).toBe("fix the bug");
   });
 
-  describe("discover()", () => {
-    it("returns empty array when no sessions exist", async () => {
-      const sessions = await adapter.discover();
-      expect(sessions).toEqual([]);
-    });
-
-    it("discovers stopped sessions from metadata", async () => {
-      const log = buildStreamJsonLog([
-        {
-          type: "user",
-          sessionId: "sess-1",
-          cwd: "/tmp/project",
-          message: { role: "user", content: "hello world" },
-        },
-        {
-          type: "assistant",
-          sessionId: "sess-1",
-          message: {
-            role: "assistant",
-            content: "Hi there!",
-            model: "claude-sonnet-4-5-20250929",
-            usage: { input_tokens: 100, output_tokens: 50 },
-          },
-        },
-      ]);
-
-      await createFakeSession({ sessionId: "sess-1", logContent: log });
-
-      const sessions = await adapter.discover();
-      expect(sessions).toHaveLength(1);
-      expect(sessions[0].id).toBe("sess-1");
-      expect(sessions[0].status).toBe("stopped");
-      expect(sessions[0].adapter).toBe("slate");
-      expect(sessions[0].cwd).toBe("/tmp/project");
-      expect(sessions[0].model).toBe("claude-sonnet-4-5-20250929");
-      expect(sessions[0].tokens).toEqual({ in: 100, out: 50 });
-    });
-
-    it("detects running sessions when PID is alive", async () => {
-      const aliveAdapter = new SlateAdapter({
-        slateDir,
-        sessionsMetaDir,
-        getPids: async () => new Map(),
-        isProcessAlive: (pid) => pid === 42,
-      });
-
-      await createFakeSession({ sessionId: "sess-alive", pid: 42 });
-
-      const sessions = await aliveAdapter.discover();
-      expect(sessions).toHaveLength(1);
-      expect(sessions[0].status).toBe("running");
-      expect(sessions[0].pid).toBe(42);
-    });
+  it("includes --output-format stream-json", () => {
+    const args = buildSlateArgs(baseLaunchOpts);
+    expect(args).toContain("--output-format");
+    const idx = args.indexOf("--output-format");
+    expect(args[idx + 1]).toBe("stream-json");
   });
 
-  describe("isAlive()", () => {
-    it("returns false for unknown session", async () => {
-      expect(await adapter.isAlive("nonexistent")).toBe(false);
-    });
-
-    it("returns false when PID is dead", async () => {
-      await createFakeSession({ sessionId: "sess-dead", pid: 99999 });
-      expect(await adapter.isAlive("sess-dead")).toBe(false);
-    });
-
-    it("returns true when PID is alive", async () => {
-      const aliveAdapter = new SlateAdapter({
-        slateDir,
-        sessionsMetaDir,
-        getPids: async () => new Map(),
-        isProcessAlive: (pid) => pid === 55,
-      });
-
-      await createFakeSession({ sessionId: "sess-55", pid: 55 });
-      expect(await aliveAdapter.isAlive("sess-55")).toBe(true);
-    });
-
-    it("detects PID recycling via start time mismatch", async () => {
-      const recycledPids = new Map<number, PidInfo>([
-        [
-          55,
-          {
-            pid: 55,
-            cwd: "/tmp",
-            args: "slate -q",
-            startTime: "Fri Mar 13 10:00:00 2026", // different from recorded
-          },
-        ],
-      ]);
-
-      const recycleAdapter = new SlateAdapter({
-        slateDir,
-        sessionsMetaDir,
-        getPids: async () => recycledPids,
-        isProcessAlive: () => true,
-      });
-
-      await createFakeSession({
-        sessionId: "sess-recycled",
-        pid: 55,
-        startTime: "Thu Mar 12 10:00:00 2026",
-      });
-
-      expect(await recycleAdapter.isAlive("sess-recycled")).toBe(false);
-    });
+  it("includes --dangerously-set-permissions", () => {
+    const args = buildSlateArgs(baseLaunchOpts);
+    expect(args).toContain("--dangerously-set-permissions");
   });
 
-  describe("list()", () => {
-    it("returns empty array when no sessions exist", async () => {
-      const sessions = await adapter.list({ all: true });
-      expect(sessions).toEqual([]);
-    });
-
-    it("filters by status", async () => {
-      await createFakeSession({ sessionId: "sess-1" });
-
-      const running = await adapter.list({ status: "running" });
-      expect(running).toEqual([]);
-
-      const stopped = await adapter.list({ status: "stopped", all: true });
-      expect(stopped).toHaveLength(1);
-    });
-
-    it("hides stopped sessions by default", async () => {
-      await createFakeSession({ sessionId: "sess-stopped" });
-
-      const sessions = await adapter.list();
-      expect(sessions).toEqual([]);
-    });
-
-    it("shows stopped sessions with --all", async () => {
-      await createFakeSession({ sessionId: "sess-stopped" });
-
-      const sessions = await adapter.list({ all: true });
-      expect(sessions).toHaveLength(1);
-    });
+  it("includes -w when cwd is provided", () => {
+    const args = buildSlateArgs({ ...baseLaunchOpts, cwd: "/tmp/workspace" });
+    expect(args).toContain("-w");
+    const wIdx = args.indexOf("-w");
+    expect(args[wIdx + 1]).toBe("/tmp/workspace");
   });
 
-  describe("peek()", () => {
-    it("returns assistant messages from JSONL log", async () => {
-      const log = buildStreamJsonLog([
-        {
-          type: "user",
-          sessionId: "sess-peek",
-          message: { role: "user", content: "what is 2+2?" },
-        },
-        {
-          type: "assistant",
-          sessionId: "sess-peek",
-          message: { role: "assistant", content: "The answer is 4." },
-        },
-        {
-          type: "assistant",
-          sessionId: "sess-peek",
-          message: { role: "assistant", content: "Anything else?" },
-        },
-      ]);
-
-      await createFakeSession({ sessionId: "sess-peek", logContent: log });
-
-      const output = await adapter.peek("sess-peek");
-      expect(output).toContain("The answer is 4.");
-      expect(output).toContain("Anything else?");
-    });
-
-    it("respects line limit", async () => {
-      const messages = [];
-      for (let i = 0; i < 10; i++) {
-        messages.push({
-          type: "assistant",
-          sessionId: "sess-limit",
-          message: { role: "assistant", content: `Message ${i}` },
-        });
-      }
-      const log = buildStreamJsonLog(messages);
-
-      await createFakeSession({ sessionId: "sess-limit", logContent: log });
-
-      const output = await adapter.peek("sess-limit", { lines: 3 });
-      expect(output).toContain("Message 7");
-      expect(output).toContain("Message 8");
-      expect(output).toContain("Message 9");
-      expect(output).not.toContain("Message 6");
-    });
-
-    it("handles array content blocks", async () => {
-      const log = buildStreamJsonLog([
-        {
-          type: "assistant",
-          sessionId: "sess-blocks",
-          message: {
-            role: "assistant",
-            content: [
-              { type: "text", text: "First block" },
-              { type: "text", text: "Second block" },
-            ],
-          },
-        },
-      ]);
-
-      await createFakeSession({ sessionId: "sess-blocks", logContent: log });
-
-      const output = await adapter.peek("sess-blocks");
-      expect(output).toContain("First block");
-      expect(output).toContain("Second block");
-    });
-
-    it("throws for unknown session", async () => {
-      await expect(adapter.peek("nonexistent")).rejects.toThrow(
-        "Session not found",
-      );
-    });
+  it("omits -w when no cwd is provided", () => {
+    const args = buildSlateArgs(baseLaunchOpts);
+    expect(args).not.toContain("-w");
   });
 
-  describe("status()", () => {
-    it("returns session details", async () => {
-      const log = buildStreamJsonLog([
-        {
-          type: "assistant",
-          sessionId: "sess-status",
-          cwd: "/tmp/project",
-          message: {
-            role: "assistant",
-            content: "Hello",
-            model: "claude-sonnet-4-5-20250929",
-            usage: { input_tokens: 200, output_tokens: 100 },
-          },
-        },
-      ]);
-
-      await createFakeSession({ sessionId: "sess-status", logContent: log });
-
-      const session = await adapter.status("sess-status");
-      expect(session.id).toBe("sess-status");
-      expect(session.adapter).toBe("slate");
-      expect(session.status).toBe("stopped");
-      expect(session.model).toBe("claude-sonnet-4-5-20250929");
-      expect(session.tokens).toEqual({ in: 200, out: 100 });
-    });
-
-    it("throws for unknown session", async () => {
-      await expect(adapter.status("nonexistent")).rejects.toThrow(
-        "Session not found",
-      );
-    });
+  it("does not include --model (not supported by Slate CLI)", () => {
+    const args = buildSlateArgs({ ...baseLaunchOpts, model: "opus" });
+    expect(args).not.toContain("--model");
+    expect(args).not.toContain("opus");
   });
 
-  describe("stop()", () => {
-    it("throws when no PID found", async () => {
-      await expect(adapter.stop("nonexistent")).rejects.toThrow(
-        "No running process",
-      );
+  it("handles prompts with special characters", () => {
+    const args = buildSlateArgs({
+      ...baseLaunchOpts,
+      prompt: 'fix the "bug" in file.ts',
     });
+    const qIdx = args.indexOf("-q");
+    expect(args[qIdx + 1]).toBe('fix the "bug" in file.ts');
   });
 
-  describe("stream-json parsing", () => {
-    it("aggregates tokens across multiple assistant messages", async () => {
-      const log = buildStreamJsonLog([
-        {
-          type: "assistant",
-          sessionId: "sess-tokens",
-          message: {
-            role: "assistant",
-            content: "First response",
-            usage: { input_tokens: 100, output_tokens: 50 },
-          },
-        },
-        {
-          type: "assistant",
-          sessionId: "sess-tokens",
-          message: {
-            role: "assistant",
-            content: "Second response",
-            usage: { input_tokens: 200, output_tokens: 100 },
-          },
-        },
-      ]);
+  it("handles prompts starting with dashes", () => {
+    const args = buildSlateArgs({
+      ...baseLaunchOpts,
+      prompt: "---\nfrontmatter\n---\nfix it",
+    });
+    const qIdx = args.indexOf("-q");
+    expect(args[qIdx + 1]).toBe("---\nfrontmatter\n---\nfix it");
+  });
+});
 
-      await createFakeSession({ sessionId: "sess-tokens", logContent: log });
+// --- discover tests ---
 
-      const session = await adapter.status("sess-tokens");
-      expect(session.tokens).toEqual({ in: 300, out: 150 });
+describe("discover", () => {
+  it("returns empty when no sessions exist", async () => {
+    const sessions = await adapter.discover();
+    expect(sessions).toEqual([]);
+  });
+
+  it("discovers stopped sessions from metadata", async () => {
+    await writeSessionMeta("sess-1", 12345);
+    await writeExtendedMeta("sess-1", {
+      cwd: "/tmp/project",
+      prompt: "hello",
     });
 
-    it("extracts first user prompt", async () => {
-      const log = buildStreamJsonLog([
-        {
-          type: "user",
-          sessionId: "sess-prompt",
-          message: { role: "user", content: "Build me a web app" },
-        },
-        {
-          type: "assistant",
-          sessionId: "sess-prompt",
-          message: { role: "assistant", content: "Sure!" },
-        },
-      ]);
+    const sessions = await adapter.discover();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].id).toBe("sess-1");
+    expect(sessions[0].status).toBe("stopped");
+    expect(sessions[0].cwd).toBe("/tmp/project");
+    expect(sessions[0].prompt).toBe("hello");
+  });
 
-      await createFakeSession({ sessionId: "sess-prompt", logContent: log });
-
-      const session = await adapter.status("sess-prompt");
-      expect(session.prompt).toBe("Build me a web app");
+  it("discovers running sessions when PID is alive", async () => {
+    const runningPids = new Map<number, PidInfo>();
+    runningPids.set(99999, {
+      pid: 99999,
+      cwd: "/tmp",
+      args: "slate -q test",
     });
 
-    it("skips malformed JSONL lines gracefully", async () => {
-      const log = [
-        "not valid json",
-        JSON.stringify({
-          type: "assistant",
-          sessionId: "sess-malformed",
-          message: { role: "assistant", content: "Valid message" },
-        }),
-        "{broken json",
-      ].join("\n");
-
-      await createFakeSession({
-        sessionId: "sess-malformed",
-        logContent: log,
-      });
-
-      const output = await adapter.peek("sess-malformed");
-      expect(output).toBe("Valid message");
+    const liveAdapter = new SlateAdapter({
+      slateDir,
+      sessionsMetaDir,
+      getPids: async () => runningPids,
+      isProcessAlive: (pid) => pid === 99999,
     });
+
+    await writeSessionMeta("sess-2", 99999);
+    await writeExtendedMeta("sess-2", { cwd: "/tmp" });
+
+    const sessions = await liveAdapter.discover();
+    const tracked = sessions.find((s) => s.id === "sess-2");
+    expect(tracked).toBeDefined();
+    expect(tracked?.status).toBe("running");
+    expect(tracked?.pid).toBe(99999);
+  });
+
+  it("discovers untracked running slate processes", async () => {
+    const runningPids = new Map<number, PidInfo>();
+    runningPids.set(77777, {
+      pid: 77777,
+      cwd: "/tmp/other",
+      args: "slate -q something",
+    });
+
+    const liveAdapter = new SlateAdapter({
+      slateDir,
+      sessionsMetaDir,
+      getPids: async () => runningPids,
+      isProcessAlive: () => true,
+    });
+
+    const sessions = await liveAdapter.discover();
+    expect(sessions.some((s) => s.id === "slate-pid-77777")).toBe(true);
+  });
+
+  it("skips .ext.json files during discovery", async () => {
+    await writeSessionMeta("sess-3", 11111);
+    await writeExtendedMeta("sess-3", { cwd: "/tmp" });
+
+    const sessions = await adapter.discover();
+    // Should only find one session, not treat .ext.json as a session
+    const sessionIds = sessions.map((s) => s.id);
+    expect(sessionIds).toEqual(["sess-3"]);
+  });
+});
+
+// --- isAlive tests ---
+
+describe("isAlive", () => {
+  it("returns false when session does not exist", async () => {
+    expect(await adapter.isAlive("nonexistent")).toBe(false);
+  });
+
+  it("returns false when PID is dead", async () => {
+    await writeSessionMeta("dead-sess", 12345);
+    expect(await adapter.isAlive("dead-sess")).toBe(false);
+  });
+
+  it("returns true when PID is alive", async () => {
+    const liveAdapter = new SlateAdapter({
+      slateDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => pid === 44444,
+    });
+
+    await writeSessionMeta("live-sess", 44444);
+    expect(await liveAdapter.isAlive("live-sess")).toBe(true);
+  });
+});
+
+// --- list tests ---
+
+describe("list", () => {
+  it("filters to running/idle by default", async () => {
+    await writeSessionMeta("stopped-1", 11111);
+
+    const sessions = await adapter.list();
+    // Session with dead PID = stopped, filtered out by default
+    expect(sessions).toHaveLength(0);
+  });
+
+  it("includes stopped sessions with { all: true }", async () => {
+    await writeSessionMeta("stopped-1", 11111);
+
+    const sessions = await adapter.list({ all: true });
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].status).toBe("stopped");
+  });
+
+  it("filters by status", async () => {
+    await writeSessionMeta("s1", 11111);
+
+    const running = await adapter.list({ status: "running" });
+    expect(running).toHaveLength(0);
+
+    const stopped = await adapter.list({ status: "stopped" });
+    expect(stopped).toHaveLength(1);
+  });
+});
+
+// --- peek tests ---
+
+describe("peek", () => {
+  it("throws for nonexistent session", async () => {
+    await expect(adapter.peek("nonexistent")).rejects.toThrow(
+      "Session not found",
+    );
+  });
+
+  it("reads from log file when available", async () => {
+    const logPath = path.join(tmpDir, "test.log");
+    await fs.writeFile(logPath, "line1\nline2\nline3\n");
+
+    await writeSessionMeta("peek-sess", 11111);
+    await writeExtendedMeta("peek-sess", { logPath });
+
+    const output = await adapter.peek("peek-sess");
+    expect(output).toContain("line1");
+    expect(output).toContain("line3");
+  });
+
+  it("returns fallback message when no log file", async () => {
+    await writeSessionMeta("no-log-sess", 11111);
+
+    const output = await adapter.peek("no-log-sess");
+    expect(output).toContain("Slate session");
+    expect(output).toContain("no-log-sess");
+  });
+
+  it("respects lines option", async () => {
+    const logPath = path.join(tmpDir, "long.log");
+    const lines = Array.from({ length: 50 }, (_, i) => `line-${i + 1}`);
+    await fs.writeFile(logPath, lines.join("\n"));
+
+    await writeSessionMeta("lines-sess", 11111);
+    await writeExtendedMeta("lines-sess", { logPath });
+
+    const output = await adapter.peek("lines-sess", { lines: 5 });
+    const outputLines = output.split("\n");
+    expect(outputLines).toHaveLength(5);
+    expect(outputLines[0]).toContain("line-46");
+  });
+});
+
+// --- status tests ---
+
+describe("status", () => {
+  it("throws for nonexistent session", async () => {
+    await expect(adapter.status("nonexistent")).rejects.toThrow(
+      "Session not found",
+    );
+  });
+
+  it("returns stopped status for dead PID", async () => {
+    await writeSessionMeta("dead-sess", 11111);
+    await writeExtendedMeta("dead-sess", {
+      cwd: "/tmp",
+      model: "sonnet",
+      prompt: "test prompt",
+    });
+
+    const session = await adapter.status("dead-sess");
+    expect(session.status).toBe("stopped");
+    expect(session.cwd).toBe("/tmp");
+    expect(session.model).toBe("sonnet");
+    expect(session.prompt).toBe("test prompt");
+    expect(session.pid).toBeUndefined();
+  });
+
+  it("returns running status for alive PID", async () => {
+    const liveAdapter = new SlateAdapter({
+      slateDir,
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: (pid) => pid === 55555,
+    });
+
+    await writeSessionMeta("live-sess", 55555);
+    await writeExtendedMeta("live-sess", { cwd: "/tmp" });
+
+    const session = await liveAdapter.status("live-sess");
+    expect(session.status).toBe("running");
+    expect(session.pid).toBe(55555);
+  });
+});
+
+// --- stop tests ---
+
+describe("stop", () => {
+  it("throws when session has no metadata", async () => {
+    await expect(adapter.stop("nonexistent")).rejects.toThrow(
+      "No running process",
+    );
+  });
+
+  it("throws when process is already dead", async () => {
+    await writeSessionMeta("dead-sess", 11111);
+
+    await expect(adapter.stop("dead-sess")).rejects.toThrow(
+      "Process already dead",
+    );
+  });
+});
+
+// --- PID recycling detection ---
+
+describe("PID recycling detection", () => {
+  it("detects recycled PID via start time mismatch", async () => {
+    const runningPids = new Map<number, PidInfo>();
+    runningPids.set(12345, {
+      pid: 12345,
+      cwd: "/tmp",
+      args: "slate -q test",
+      startTime: "Thu Mar 12 18:00:00 2026",
+    });
+
+    const recycleAdapter = new SlateAdapter({
+      slateDir,
+      sessionsMetaDir,
+      getPids: async () => runningPids,
+      isProcessAlive: () => true,
+    });
+
+    // Session was launched much earlier
+    await writeSessionMeta("recycled-sess", 12345, {
+      startTime: "Wed Mar 11 10:00:00 2026",
+    });
+
+    const alive = await recycleAdapter.isAlive("recycled-sess");
+    expect(alive).toBe(false);
   });
 });
