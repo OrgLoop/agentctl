@@ -6,14 +6,7 @@ import path from "node:path";
 export interface SessionRecord {
   id: string;
   adapter: string;
-  status:
-    | "running"
-    | "idle"
-    | "stopped"
-    | "error"
-    | "completed"
-    | "failed"
-    | "pending";
+  status: "running" | "idle" | "stopped" | "error" | "completed" | "failed";
   startedAt: string; // ISO 8601
   stoppedAt?: string;
   cwd?: string;
@@ -31,7 +24,8 @@ export interface SessionRecord {
 export interface Lock {
   directory: string; // absolute, resolved path
   type: "auto" | "manual";
-  sessionId?: string; // for auto-locks
+  pid?: number; // for auto-locks — PID that owns the lock (drives lifecycle)
+  sessionId?: string; // for auto-locks — informational only (display/enrichment)
   lockedBy?: string; // for manual locks
   reason?: string;
   lockedAt: string; // ISO 8601

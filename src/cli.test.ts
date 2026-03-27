@@ -104,12 +104,8 @@ describe("shortId (#71)", () => {
     expect(shortId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")).toBe("aaaaaaaa");
   });
 
-  it("preserves full pending-<pid> IDs", () => {
-    expect(shortId("pending-69460")).toBe("pending-69460");
-    expect(shortId("pending-12345")).toBe("pending-12345");
-  });
-
-  it("handles pending- with long PIDs", () => {
-    expect(shortId("pending-123456789")).toBe("pending-123456789");
+  it("truncates all IDs to 8 chars", () => {
+    expect(shortId("abcdefghij")).toBe("abcdefgh");
+    expect(shortId("12345678")).toBe("12345678");
   });
 });

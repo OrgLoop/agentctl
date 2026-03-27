@@ -3,12 +3,15 @@ import type {
   AgentSession,
   DiscoveredSession,
 } from "../core/types.js";
+import type { FuseEngine } from "./fuse-engine.js";
 import type { SessionRecord, StateManager } from "./state.js";
 
 export interface SessionTrackerOpts {
   adapters: Record<string, AgentAdapter>;
   /** Override PID liveness check for testing (default: process.kill(pid, 0)) */
   isProcessAlive?: (pid: number) => boolean;
+  /** Optional fuse engine reference — sessions with active fuses won't be marked stopped */
+  fuseEngine?: FuseEngine;
 }
 
 /**
@@ -33,12 +36,14 @@ export class SessionTracker {
   private state: StateManager;
   private adapters: Record<string, AgentAdapter>;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private fuseEngine?: FuseEngine;
   private cleanupHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(state: StateManager, opts: SessionTrackerOpts) {
     this.state = state;
     this.adapters = opts.adapters;
     this.isProcessAlive = opts.isProcessAlive ?? defaultIsProcessAlive;
+    this.fuseEngine = opts.fuseEngine;
   }
 
   /**
@@ -66,16 +71,6 @@ export class SessionTracker {
   /** Track a newly launched session (stores launch metadata in state) */
   track(session: AgentSession, adapterName: string): SessionRecord {
     const record = sessionToRecord(session, adapterName);
-
-    // Pending→UUID reconciliation: if this is a real session (not pending),
-    // remove any pending-PID placeholder with the same PID
-    if (!session.id.startsWith("pending-") && session.pid) {
-      for (const [id, existing] of Object.entries(this.state.getSessions())) {
-        if (id.startsWith("pending-") && existing.pid === session.pid) {
-          this.state.removeSession(id);
-        }
-      }
-    }
 
     this.state.setSession(session.id, record);
     return record;
@@ -129,10 +124,6 @@ export class SessionTracker {
   ): { sessions: SessionRecord[]; stoppedLaunchIds: string[] } {
     // Build lookups for discovered sessions
     const discoveredIds = new Set(discovered.map((d) => d.id));
-    const discoveredPids = new Map<number, string>();
-    for (const d of discovered) {
-      if (d.pid) discoveredPids.set(d.pid, d.id);
-    }
 
     // 1. Convert discovered sessions to records, enriching with launch metadata
     const sessions: SessionRecord[] = discovered.map((disc) =>
@@ -144,12 +135,7 @@ export class SessionTracker {
     const now = Date.now();
 
     for (const [id, record] of Object.entries(this.state.getSessions())) {
-      if (
-        record.status !== "running" &&
-        record.status !== "idle" &&
-        record.status !== "pending"
-      )
-        continue;
+      if (record.status !== "running" && record.status !== "idle") continue;
 
       // If adapter for this session didn't succeed, include as-is from launch metadata
       // (we can't verify status, so trust the last-known state)
@@ -161,20 +147,26 @@ export class SessionTracker {
       // Skip if adapter returned this session (it's still active)
       if (discoveredIds.has(id)) continue;
 
-      // Check if this session's PID was resolved to a different ID (pending→UUID)
-      if (record.pid && discoveredPids.has(record.pid)) {
-        // PID was resolved to a real session — remove stale launch entry
-        this.state.removeSession(id);
-        stoppedLaunchIds.push(id);
-        continue;
-      }
-
       // Grace period: don't mark recently-launched sessions as stopped
       const launchAge = now - new Date(record.startedAt).getTime();
       if (launchAge < LAUNCH_GRACE_PERIOD_MS) {
         // Still within grace period — include as-is in results
         sessions.push(record);
         continue;
+      }
+
+      // Fuse guard: if the fuse engine has an active fuse for this session
+      // AND the PID is alive, the session is still running — the adapter
+      // just can't see it (e.g. opencode doesn't persist running sessions).
+      if (record.pid && this.isProcessAlive(record.pid)) {
+        const hasActiveFuse =
+          this.fuseEngine?.listActive().some((f) => f.sessionId === id) ??
+          false;
+        if (hasActiveFuse) {
+          // Fuse is tracking this session and PID is alive — keep running
+          sessions.push(record);
+          continue;
+        }
       }
 
       // Session disappeared from adapter results — mark stopped
@@ -197,12 +189,7 @@ export class SessionTracker {
   cleanupDeadLaunches(): string[] {
     const dead: string[] = [];
     for (const [id, record] of Object.entries(this.state.getSessions())) {
-      if (
-        record.status !== "running" &&
-        record.status !== "idle" &&
-        record.status !== "pending"
-      )
-        continue;
+      if (record.status !== "running" && record.status !== "idle") continue;
 
       if (record.pid && !this.isProcessAlive(record.pid)) {
         this.state.setSession(id, {
@@ -214,6 +201,37 @@ export class SessionTracker {
       }
     }
     return dead;
+  }
+
+  /**
+   * Find running sessions older than `maxAgeMs` — candidates for "stuck" detection.
+   * Returns session IDs of running sessions that exceed the age threshold (#122).
+   */
+  getStaleSessionIds(maxAgeMs: number): string[] {
+    const stale: string[] = [];
+    const now = Date.now();
+    for (const [id, record] of Object.entries(this.state.getSessions())) {
+      if (record.status !== "running" && record.status !== "idle") continue;
+      const age = now - new Date(record.startedAt).getTime();
+      if (age > maxAgeMs) stale.push(id);
+    }
+    return stale;
+  }
+
+  /**
+   * Mark a session as stuck/errored. Used when a session is detected
+   * as alive but not making progress (#122).
+   */
+  markStuck(sessionId: string): SessionRecord | undefined {
+    const record = this.state.getSession(sessionId);
+    if (!record) return undefined;
+    const updated = {
+      ...record,
+      status: "error" as const,
+      stoppedAt: new Date().toISOString(),
+    };
+    this.state.setSession(sessionId, updated);
+    return updated;
   }
 }
 

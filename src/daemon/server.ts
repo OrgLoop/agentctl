@@ -116,7 +116,10 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     defaultDurationMs: 10 * 60 * 1000,
     emitter,
   });
-  const sessionTracker = new SessionTracker(state, { adapters });
+  const sessionTracker = new SessionTracker(state, {
+    adapters,
+    fuseEngine,
+  });
   const metrics = new MetricsRegistry(lockManager, fuseEngine);
 
   // Wire up events
@@ -131,12 +134,17 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     emitWebhook(webhookConfig, payload);
   };
 
-  // 8. Initial PID liveness cleanup for daemon-launched sessions
-  //    (replaces the old validateAllSessions — much simpler, only checks launches)
+  // 8. Initial PID liveness cleanup — self-healing locks + dead session detection
+  //    Locks clean themselves via PID liveness (independent of session state).
+  const deadLockPids = lockManager.cleanupDeadLocks(isProcessAlive);
+  if (deadLockPids.length > 0) {
+    console.error(
+      `Startup cleanup: released ${deadLockPids.length} dead auto-lock(s)`,
+    );
+  }
   const initialDead = sessionTracker.cleanupDeadLaunches();
   if (initialDead.length > 0) {
     for (const id of initialDead) {
-      lockManager.autoUnlock(id);
       const rec = state.getSession(id);
       if (rec) emitSessionStoppedWebhook(rec);
     }
@@ -145,12 +153,68 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
     );
   }
 
+  // 8b. Detect stuck sessions — running > 5 min with no assistant output (#122)
+  const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
+  const staleIds = sessionTracker.getStaleSessionIds(STUCK_THRESHOLD_MS);
+  if (staleIds.length > 0) {
+    let stuckCount = 0;
+    for (const id of staleIds) {
+      const record = state.getSession(id);
+      if (!record) continue;
+      const adapterName = record.adapter;
+      const adapter = adapters[adapterName];
+      if (!adapter) continue;
+
+      try {
+        const output = await adapter.peek(id, { lines: 1 });
+        if (!output || output.trim() === "") {
+          // Session has no assistant output — stuck at enqueue/dequeue
+          sessionTracker.markStuck(id);
+          lockManager.autoUnlock(id);
+          // Kill the stuck process
+          if (record.pid) {
+            try {
+              process.kill(record.pid, "SIGTERM");
+            } catch {
+              // Already dead
+            }
+          }
+          const stuckRec = state.getSession(id);
+          if (stuckRec) emitSessionStoppedWebhook(stuckRec);
+          stuckCount++;
+        }
+      } catch {
+        // peek failed — session not discoverable, mark stuck
+        sessionTracker.markStuck(id);
+        lockManager.autoUnlock(id);
+        if (record.pid) {
+          try {
+            process.kill(record.pid, "SIGTERM");
+          } catch {
+            // Already dead
+          }
+        }
+        const stuckRec = state.getSession(id);
+        if (stuckRec) emitSessionStoppedWebhook(stuckRec);
+        stuckCount++;
+      }
+    }
+    if (stuckCount > 0) {
+      console.error(
+        `Startup cleanup: marked ${stuckCount} stuck sessions as errored`,
+      );
+    }
+  }
+
   // 9. Resume fuse timers
   fuseEngine.resumeTimers();
 
-  // 10. Start periodic PID liveness check for lock cleanup (30s interval)
+  // 10. Start periodic PID liveness checks (30s interval)
+  //     Locks self-heal via PID liveness; session tracker handles session state.
+  const lockCleanupHandle = setInterval(() => {
+    lockManager.cleanupDeadLocks(isProcessAlive);
+  }, 30_000);
   sessionTracker.startLaunchCleanup((deadId) => {
-    lockManager.autoUnlock(deadId);
     const rec = state.getSession(deadId);
     if (rec) emitSessionStoppedWebhook(rec);
   });
@@ -232,6 +296,7 @@ export async function startDaemon(opts: DaemonStartOpts = {}): Promise<{
 
   // Shutdown function
   const shutdown = async () => {
+    clearInterval(lockCleanupHandle);
     sessionTracker.stopLaunchCleanup();
     fuseEngine.shutdown();
     state.flush();
@@ -407,9 +472,9 @@ function createRequestHandler(ctx: HandlerContext) {
         const { sessions: allSessions, stoppedLaunchIds } =
           ctx.sessionTracker.reconcileAndEnrich(discovered, succeededAdapters);
 
-        // Release locks and emit webhooks for sessions that disappeared
+        // Emit webhooks for sessions that disappeared
+        // (Locks are self-healing via PID liveness — no need to couple to session state)
         for (const id of stoppedLaunchIds) {
-          ctx.lockManager.autoUnlock(id);
           const rec = ctx.state.getSession(id);
           if (rec) ctx.emitSessionStoppedWebhook(rec);
         }
@@ -512,9 +577,52 @@ function createRequestHandler(ctx: HandlerContext) {
         if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
         // Use the full session ID if we resolved it from the tracker
         const peekId = tracked?.id || (params.id as string);
-        return adapter.peek(peekId, {
-          lines: params.lines as number | undefined,
-        });
+        try {
+          return await adapter.peek(peekId, {
+            lines: params.lines as number | undefined,
+          });
+        } catch (peekErr) {
+          // Fallback: read assistant output from launch log (#135)
+          const logPath = tracked?.meta?.logPath as string | undefined;
+          if (logPath) {
+            try {
+              const logContent = await fs.readFile(logPath, "utf-8");
+              const assistantMessages: string[] = [];
+              for (const line of logContent.split("\n")) {
+                if (!line.trim()) continue;
+                try {
+                  const msg = JSON.parse(line);
+                  if (msg.type === "assistant" && msg.message?.content) {
+                    const text =
+                      typeof msg.message.content === "string"
+                        ? msg.message.content
+                        : Array.isArray(msg.message.content)
+                          ? msg.message.content
+                              .filter(
+                                (b: { type: string; text?: string }) =>
+                                  b.type === "text" && b.text,
+                              )
+                              .map(
+                                (b: { type: string; text?: string }) => b.text,
+                              )
+                              .join("\n")
+                          : "";
+                    if (text) assistantMessages.push(text);
+                  }
+                } catch {
+                  // skip malformed
+                }
+              }
+              if (assistantMessages.length > 0) {
+                const maxLines = (params.lines as number | undefined) ?? 20;
+                return assistantMessages.slice(-maxLines).join("\n---\n");
+              }
+            } catch {
+              // log file unreadable — fall through to original error
+            }
+          }
+          throw peekErr;
+        }
       }
 
       case "session.launch": {
@@ -574,9 +682,67 @@ function createRequestHandler(ctx: HandlerContext) {
 
         const record = ctx.sessionTracker.track(session, adapterName);
 
-        // Auto-lock
-        if (cwd) {
-          ctx.lockManager.autoLock(cwd, session.id);
+        // Auto-lock by PID (self-healing — lock released when PID dies)
+        if (cwd && session.pid) {
+          ctx.lockManager.autoLock(cwd, session.pid, session.id);
+        }
+
+        // Set a lifecycle fuse so reconcileAndEnrich won't falsely mark this
+        // session as stopped when the adapter's list() doesn't return it (#146).
+        // The fuse acts as a marker; reconcileAndEnrich checks fuse + PID liveness.
+        if (cwd && session.pid) {
+          const LIFECYCLE_FUSE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+          ctx.fuseEngine.setFuse({
+            directory: cwd,
+            sessionId: session.id,
+            ttlMs: LIFECYCLE_FUSE_TTL_MS,
+            label: `lifecycle:${adapterName}:${session.id.slice(0, 8)}`,
+          });
+        }
+
+        return record;
+      }
+
+      case "session.launch.track": {
+        // Register an externally-launched session (e.g. from matrix/orchestrator)
+        // so it appears in state, gets locks, fuses, webhooks, etc.
+        const id = params.id as string;
+        const adapterName = params.adapter as string;
+        const cwd = params.cwd as string | undefined;
+        const group = params.group as string | undefined;
+        const pid = params.pid as number | undefined;
+        const model = params.model as string | undefined;
+        const prompt = params.prompt as string | undefined;
+
+        const session: import("../core/types.js").AgentSession = {
+          id,
+          adapter: adapterName,
+          status: "running",
+          startedAt: new Date(),
+          cwd,
+          model,
+          prompt: prompt?.slice(0, 200),
+          pid,
+          group,
+          meta: {},
+        };
+
+        const record = ctx.sessionTracker.track(session, adapterName);
+
+        // Auto-lock by PID
+        if (cwd && pid) {
+          ctx.lockManager.autoLock(cwd, pid, id);
+        }
+
+        // Set lifecycle fuse (same as session.launch)
+        if (cwd && pid) {
+          const LIFECYCLE_FUSE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+          ctx.fuseEngine.setFuse({
+            directory: cwd,
+            sessionId: id,
+            ttlMs: LIFECYCLE_FUSE_TTL_MS,
+            label: `lifecycle:${adapterName}:${id.slice(0, 8)}`,
+          });
         }
 
         return record;
@@ -585,18 +751,6 @@ function createRequestHandler(ctx: HandlerContext) {
       case "session.stop": {
         const id = params.id as string;
         const launchRecord = ctx.sessionTracker.getSession(id);
-
-        // Ghost pending entry with dead PID: remove from state with --force
-        if (
-          launchRecord?.id.startsWith("pending-") &&
-          params.force &&
-          launchRecord.pid &&
-          !isProcessAlive(launchRecord.pid)
-        ) {
-          ctx.lockManager.autoUnlock(launchRecord.id);
-          ctx.sessionTracker.removeSession(launchRecord.id);
-          return null;
-        }
 
         const adapterName = (params.adapter as string) || launchRecord?.adapter;
         if (!adapterName)
@@ -612,8 +766,17 @@ function createRequestHandler(ctx: HandlerContext) {
           force: params.force as boolean | undefined,
         });
 
-        // Remove auto-lock
-        ctx.lockManager.autoUnlock(sessionId);
+        // Remove auto-lock (prefer PID-based, fallback to sessionId)
+        if (launchRecord?.pid) {
+          ctx.lockManager.autoUnlockByPid(launchRecord.pid);
+        } else {
+          ctx.lockManager.autoUnlock(sessionId);
+        }
+
+        // Cancel lifecycle fuse (#146)
+        if (launchRecord?.cwd) {
+          ctx.fuseEngine.cancelFuse(launchRecord.cwd);
+        }
 
         // Mark stopped in launch metadata
         const stopped = ctx.sessionTracker.onSessionExit(sessionId);
@@ -641,13 +804,10 @@ function createRequestHandler(ctx: HandlerContext) {
 
       // --- Prune command (#40) --- kept for CLI backward compat
       case "session.prune": {
-        // In the stateless model, there's no session registry to prune.
-        // Clean up dead launches (PID liveness check) as a best-effort action.
+        // Clean up dead locks (PID liveness) + dead session records
+        const deadPids = ctx.lockManager.cleanupDeadLocks(isProcessAlive);
         const deadIds = ctx.sessionTracker.cleanupDeadLaunches();
-        for (const id of deadIds) {
-          ctx.lockManager.autoUnlock(id);
-        }
-        return { pruned: deadIds.length };
+        return { pruned: deadIds.length + deadPids.length };
       }
 
       case "lock.list":

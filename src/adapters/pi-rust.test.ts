@@ -2,10 +2,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { LaunchedSessionMeta } from "../utils/session-meta.js";
+import { readSessionMeta } from "../utils/session-meta.js";
 import {
   decodeProjDir,
   encodeProjDir,
-  type LaunchedSessionMeta,
   type PidInfo,
   PiRustAdapter,
 } from "./pi-rust.js";
@@ -952,7 +953,7 @@ describe("PiRustAdapter", () => {
 
   describe("session lifecycle — detached processes", () => {
     it("session shows running when persisted metadata has live PID", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "detached-session-1111-2222-333333333333",
@@ -960,12 +961,12 @@ describe("PiRustAdapter", () => {
         timestamp: sessionCreated.toISOString(),
       });
 
+      const launchedAt = new Date();
       const meta: LaunchedSessionMeta = {
         sessionId: "detached-session-1111-2222-333333333333",
         pid: 55555,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/detached-test",
-        launchedAt: sessionCreated.toISOString(),
+        startTime: launchedAt.toString(),
+        launchedAt: launchedAt.toISOString(),
       };
       await fs.writeFile(
         path.join(
@@ -989,7 +990,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("session shows stopped when persisted PID is dead", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "dead-detached-1111-2222-333333333333",
@@ -1001,8 +1002,7 @@ describe("PiRustAdapter", () => {
         sessionId: "dead-detached-1111-2222-333333333333",
         pid: 66666,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/dead-detached-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "dead-detached-1111-2222-333333333333.json"),
@@ -1023,7 +1023,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("cleans up stale metadata when PID is dead", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "cleanup-session-1111-2222-333333333333",
@@ -1039,8 +1039,7 @@ describe("PiRustAdapter", () => {
         sessionId: "cleanup-session-1111-2222-333333333333",
         pid: 77777,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/cleanup-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(metaPath, JSON.stringify(meta));
 
@@ -1056,7 +1055,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("detects PID recycling in persisted metadata via start time", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "meta-recycle-1111-2222-333333333333",
@@ -1068,8 +1067,7 @@ describe("PiRustAdapter", () => {
         sessionId: "meta-recycle-1111-2222-333333333333",
         pid: 88888,
         startTime: "Sun Feb 16 08:00:00 2026",
-        cwd: "/Users/test/meta-recycle-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "meta-recycle-1111-2222-333333333333.json"),
@@ -1089,7 +1087,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("old metadata without startTime but with live PID assumes running", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "meta-notime-1111-2222-333333333333",
@@ -1100,8 +1098,7 @@ describe("PiRustAdapter", () => {
       const meta: LaunchedSessionMeta = {
         sessionId: "meta-notime-1111-2222-333333333333",
         pid: 99999,
-        cwd: "/Users/test/meta-notime-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "meta-notime-1111-2222-333333333333.json"),
@@ -1122,7 +1119,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("wrapper dies → pi-rust continues → status shows running", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "wrapper-dies-1111-2222-333333333333",
@@ -1130,13 +1127,12 @@ describe("PiRustAdapter", () => {
         timestamp: sessionCreated.toISOString(),
       });
 
+      const launchedAt = new Date();
       const meta: LaunchedSessionMeta = {
         sessionId: "wrapper-dies-1111-2222-333333333333",
         pid: 44444,
-        wrapperPid: 11111,
-        startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/wrapper-dies-test",
-        launchedAt: sessionCreated.toISOString(),
+        startTime: launchedAt.toString(),
+        launchedAt: launchedAt.toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "wrapper-dies-1111-2222-333333333333.json"),
@@ -1157,7 +1153,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("pi-rust completes → status shows stopped", async () => {
-      const sessionCreated = new Date("2026-02-17T10:00:00Z");
+      const sessionCreated = new Date();
 
       await createFakeSession({
         id: "pi-complete-1111-2222-333333333333",
@@ -1167,7 +1163,7 @@ describe("PiRustAdapter", () => {
           {
             type: "message",
             id: "a1",
-            timestamp: new Date("2026-02-17T10:30:00Z").toISOString(),
+            timestamp: new Date().toISOString(),
             message: {
               role: "assistant",
               content: [{ type: "text", text: "All done!" }],
@@ -1181,8 +1177,7 @@ describe("PiRustAdapter", () => {
         sessionId: "pi-complete-1111-2222-333333333333",
         pid: 55555,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/pi-complete-test",
-        launchedAt: sessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "pi-complete-1111-2222-333333333333.json"),
@@ -1203,7 +1198,7 @@ describe("PiRustAdapter", () => {
     });
 
     it("old PID recycled → old session shows stopped", async () => {
-      const oldSessionCreated = new Date("2026-02-16T10:00:00Z");
+      const oldSessionCreated = new Date();
 
       await createFakeSession({
         id: "recycled-victim-1111-2222-333333333333",
@@ -1215,8 +1210,7 @@ describe("PiRustAdapter", () => {
         sessionId: "recycled-victim-1111-2222-333333333333",
         pid: 33333,
         startTime: "Sun Feb 16 10:00:01 2026",
-        cwd: "/Users/test/pid-recycled-scenario",
-        launchedAt: oldSessionCreated.toISOString(),
+        launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
         path.join(
@@ -1249,7 +1243,7 @@ describe("PiRustAdapter", () => {
 
   describe("session metadata persistence", () => {
     it("readSessionMeta returns null for nonexistent session", async () => {
-      const meta = await adapter.readSessionMeta("nonexistent");
+      const meta = await readSessionMeta(sessionsMetaDir, "nonexistent");
       expect(meta).toBeNull();
     });
 
@@ -1258,7 +1252,6 @@ describe("PiRustAdapter", () => {
         sessionId: "test-meta-1111-2222-333333333333",
         pid: 12345,
         startTime: "Mon Feb 17 10:00:01 2026",
-        cwd: "/Users/test/meta-project",
         launchedAt: new Date().toISOString(),
       };
       await fs.writeFile(
@@ -1266,7 +1259,8 @@ describe("PiRustAdapter", () => {
         JSON.stringify(metaData),
       );
 
-      const read = await adapter.readSessionMeta(
+      const read = await readSessionMeta(
+        sessionsMetaDir,
         "test-meta-1111-2222-333333333333",
       );
       expect(read).not.toBeNull();
@@ -1278,7 +1272,6 @@ describe("PiRustAdapter", () => {
       const metaData: LaunchedSessionMeta = {
         sessionId: "target-session-1111-2222-333333333333",
         pid: 12345,
-        cwd: "/test",
         launchedAt: new Date().toISOString(),
       };
       // Write under a different filename
@@ -1287,7 +1280,8 @@ describe("PiRustAdapter", () => {
         JSON.stringify(metaData),
       );
 
-      const read = await adapter.readSessionMeta(
+      const read = await readSessionMeta(
+        sessionsMetaDir,
         "target-session-1111-2222-333333333333",
       );
       expect(read).not.toBeNull();

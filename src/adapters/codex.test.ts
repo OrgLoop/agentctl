@@ -389,12 +389,12 @@ describe("CodexAdapter", () => {
         prompt: "detached test",
       });
 
+      const now = new Date();
       const meta: CodexSessionMeta = {
         sessionId: "detached-test-0000-0000-000000000000",
         pid: 55555,
-        startTime: "Thu Feb 20 10:00:01 2026",
-        cwd: "/tmp/detached-test",
-        launchedAt: "2026-02-20T10:00:00.000Z",
+        startTime: now.toUTCString(),
+        launchedAt: now.toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "detached-test-0000-0000-000000000000.json"),
@@ -421,12 +421,12 @@ describe("CodexAdapter", () => {
         prompt: "dead pid",
       });
 
+      const nowDead = new Date();
       const meta: CodexSessionMeta = {
         sessionId: "dead-pid-test-0000-0000-000000000000",
         pid: 66666,
-        startTime: "Thu Feb 20 10:00:01 2026",
-        cwd: "/tmp/dead-pid-test",
-        launchedAt: "2026-02-20T10:00:00.000Z",
+        startTime: nowDead.toUTCString(),
+        launchedAt: nowDead.toISOString(),
       };
       await fs.writeFile(
         path.join(sessionsMetaDir, "dead-pid-test-0000-0000-000000000000.json"),
@@ -447,14 +447,12 @@ describe("CodexAdapter", () => {
 
     it("sessions from metadata-only (no JSONL) are discovered", async () => {
       // Session launched but Codex hasn't written to ~/.codex/sessions/ yet
+      const nowMeta = new Date();
       const meta: CodexSessionMeta = {
         sessionId: "meta-only-test-0000-0000-000000000000",
         pid: 77777,
-        startTime: "Thu Feb 20 10:00:01 2026",
-        cwd: "/tmp/meta-only",
-        model: "gpt-5.2-codex",
-        prompt: "meta only test",
-        launchedAt: "2026-02-20T10:00:00.000Z",
+        startTime: nowMeta.toUTCString(),
+        launchedAt: nowMeta.toISOString(),
       };
       await fs.writeFile(
         path.join(
@@ -474,7 +472,6 @@ describe("CodexAdapter", () => {
       const sessions = await adapterWithLivePid.list({ all: true });
       expect(sessions).toHaveLength(1);
       expect(sessions[0].id).toBe("meta-only-test-0000-0000-000000000000");
-      expect(sessions[0].cwd).toBe("/tmp/meta-only");
       expect(sessions[0].status).toBe("running");
     });
   });

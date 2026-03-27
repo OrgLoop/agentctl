@@ -1,6 +1,6 @@
 # ADR 004: Stateless Daemon Core
 
-**Status:** Proposed  
+**Status:** Accepted (Phases 1-3 implemented in v1.4.0)  
 **Date:** 2026-02-24  
 **Author:** Doink (OpenClaw)  
 **Related:** [#51](https://github.com/orgloop/agentctl/issues/51)
@@ -15,7 +15,7 @@ The daemon maintains a `state.json` session registry that mirrors every session 
 
 The daemon acts as a **session database** when it should be a **stateless multiplexer**.
 
-## Current Architecture
+## Previous Architecture (before v1.4.0)
 
 ```
 CLI → daemon → StateManager (state.json)
@@ -62,7 +62,7 @@ The adapter interface is **already correct** — `discover()` returns ground tru
 
 All adapters implement the full interface. All are mature. The gap isn't adapter quality — it's the daemon's misuse of adapter output.
 
-## Proposed Architecture: Stateless Core
+## Implemented Architecture: Stateless Core
 
 ```
 CLI → daemon → fan-out to adapters → merge → return
@@ -140,22 +140,22 @@ The lock model is actually fine. The bug (#51) where locks accumulated was becau
 
 ## Migration Path
 
-### Phase 1: Fix the immediate bug (quick)
+### Phase 1: Fix the immediate bug ✅
 - In `poll()`, track which adapter IDs were returned by `discover()`. Sessions in state whose adapter succeeded but whose ID wasn't returned → mark stopped + autoUnlock.
 - This stops the accumulation without architectural change.
 
-### Phase 2: Make `session.list` adapter-first (medium)
+### Phase 2: Make `session.list` adapter-first ✅
 - Change `session.list` handler to fan out `discover()` to adapters
 - Enrich with daemon launch metadata (prompt, group, spec)
 - Keep `StateManager.sessions` as a **write-through cache** for launch metadata only
 - Remove the 5s polling loop
 
-### Phase 3: Clean up (small)
+### Phase 3: Clean up ✅
 - Remove `SessionTracker.poll()`, `reapStaleEntries()`, all pruning code
 - Simplify `StateManager` to only persist launch metadata, locks, fuses
 - Remove `state.json` session entries (or reduce to launch-metadata-only)
 
-### Phase 4: Separate launch metadata from session state
+### Phase 4: Separate launch metadata from session state (not started)
 - New `launches.json` (small, ~10 entries) replaces sessions in `state.json`
 - `state.json` becomes locks + fuses only
 - Clean separation of concerns

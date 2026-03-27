@@ -17,6 +17,7 @@ import { OpenClawAdapter } from "./adapters/openclaw.js";
 import { OpenCodeAdapter } from "./adapters/opencode.js";
 import { PiAdapter } from "./adapters/pi.js";
 import { PiRustAdapter } from "./adapters/pi-rust.js";
+import { SlateAdapter } from "./adapters/slate.js";
 import { DaemonClient } from "./client/daemon-client.js";
 import type {
   AgentAdapter,
@@ -33,7 +34,11 @@ import {
   orchestrateLaunch,
   parseAdapterSlots,
 } from "./launch-orchestrator.js";
-import { expandMatrix, parseMatrixFile } from "./matrix-parser.js";
+import {
+  expandMatrix,
+  expandTildePath,
+  parseMatrixFile,
+} from "./matrix-parser.js";
 import { loadConfig } from "./utils/config.js";
 import { shortId } from "./utils/display.js";
 import { createWorktree, type WorktreeInfo } from "./worktree.js";
@@ -45,6 +50,7 @@ const adapters: Record<string, AgentAdapter> = {
   opencode: new OpenCodeAdapter(),
   pi: new PiAdapter(),
   "pi-rust": new PiRustAdapter(),
+  slate: new SlateAdapter(),
 };
 
 const client = new DaemonClient();
@@ -567,6 +573,10 @@ program
   )
   .option("--branch <name>", "Branch name for --worktree")
   .option(
+    "--base-branch <name>",
+    "Base branch for worktree (default: main). Fetches origin/<base-branch> as start point",
+  )
+  .option(
     "--adapter <name>",
     "Adapter to launch (repeatable for parallel launch)",
     collectAdapter,
@@ -609,7 +619,7 @@ program
         const matrixFile = await parseMatrixFile(opts.matrix);
         slots = expandMatrix(matrixFile);
         // Matrix can override cwd; matrix prompt is used unless CLI -p overrides
-        if (matrixFile.cwd) cwd = path.resolve(matrixFile.cwd);
+        if (matrixFile.cwd) cwd = path.resolve(expandTildePath(matrixFile.cwd));
         if (!opts.prompt && matrixFile.prompt) opts.prompt = matrixFile.prompt;
       } catch (err) {
         console.error(`Failed to parse matrix file: ${(err as Error).message}`);
@@ -671,6 +681,7 @@ program
           cwd,
           hooks,
           adapters,
+          baseBranch: opts.baseBranch,
           callbackSessionKey,
           callbackAgentId,
           onSessionLaunched: (slotResult) => {
@@ -682,6 +693,9 @@ program
                   adapter: slotResult.slot.adapter,
                   cwd: slotResult.cwd,
                   group: groupId,
+                  pid: slotResult.pid,
+                  model: slotResult.slot.model,
+                  prompt: opts.prompt,
                 })
                 .catch(() => {
                   // Best effort — session will be picked up by poll
@@ -732,6 +746,7 @@ program
         worktreeInfo = await createWorktree({
           repo: opts.worktree,
           branch: opts.branch,
+          baseBranch: opts.baseBranch,
         });
         cwd = worktreeInfo.path;
         console.log(`Worktree created: ${worktreeInfo.path}`);

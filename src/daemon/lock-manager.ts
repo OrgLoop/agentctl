@@ -19,22 +19,20 @@ export class LockManager {
     return auto || null;
   }
 
-  /** Auto-lock a directory for a session. Idempotent if same session. */
-  autoLock(directory: string, sessionId: string): Lock {
+  /** Auto-lock a directory by PID. Idempotent if same PID+directory. */
+  autoLock(directory: string, pid: number, sessionId?: string): Lock {
     const resolved = path.resolve(directory);
     const existing = this.state
       .getLocks()
       .find(
-        (l) =>
-          l.directory === resolved &&
-          l.type === "auto" &&
-          l.sessionId === sessionId,
+        (l) => l.directory === resolved && l.type === "auto" && l.pid === pid,
       );
     if (existing) return existing;
 
     const lock: Lock = {
       directory: resolved,
       type: "auto",
+      pid,
       sessionId,
       lockedAt: new Date().toISOString(),
     };
@@ -42,7 +40,12 @@ export class LockManager {
     return lock;
   }
 
-  /** Remove auto-lock for a session. */
+  /** Remove auto-locks for a PID. */
+  autoUnlockByPid(pid: number): void {
+    this.state.removeLocks((l) => l.type === "auto" && l.pid === pid);
+  }
+
+  /** Remove auto-locks for a session ID (backward compat — prefers PID). */
   autoUnlock(sessionId: string): void {
     this.state.removeLocks(
       (l) => l.type === "auto" && l.sessionId === sessionId,
@@ -81,15 +84,27 @@ export class LockManager {
     );
   }
 
-  /** Update the sessionId on auto-locks when a pending ID is resolved to a real UUID. */
-  updateAutoLockSessionId(oldId: string, newId: string): void {
+  /**
+   * Self-healing PID liveness cleanup.
+   * Checks all auto-locks: if the locking PID is dead, release the lock.
+   * Returns the PIDs that were cleaned up.
+   */
+  cleanupDeadLocks(isProcessAlive: (pid: number) => boolean): number[] {
+    const deadPids: number[] = [];
     const locks = this.state.getLocks();
     for (const lock of locks) {
-      if (lock.type === "auto" && lock.sessionId === oldId) {
-        lock.sessionId = newId;
+      if (lock.type !== "auto" || !lock.pid) continue;
+      if (!isProcessAlive(lock.pid)) {
+        deadPids.push(lock.pid);
       }
     }
-    this.state.markDirty();
+    if (deadPids.length > 0) {
+      const deadSet = new Set(deadPids);
+      this.state.removeLocks(
+        (l) => l.type === "auto" && l.pid != null && deadSet.has(l.pid),
+      );
+    }
+    return [...new Set(deadPids)];
   }
 
   listAll(): Lock[] {

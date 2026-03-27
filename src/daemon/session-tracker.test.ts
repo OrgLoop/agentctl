@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, DiscoveredSession } from "../core/types.js";
+import { FuseEngine } from "./fuse-engine.js";
 import { SessionTracker } from "./session-tracker.js";
 import { StateManager } from "./state.js";
 
@@ -70,24 +71,26 @@ describe("SessionTracker", () => {
       expect(state.getSession("test-session-1")).toBeDefined();
     });
 
-    it("removes pending-PID entry when real session registers with same PID", () => {
-      tracker.track(
-        makeSession({ id: "pending-11111", status: "running", pid: 11111 }),
-        "claude-code",
-      );
-      expect(state.getSession("pending-11111")).toBeDefined();
+    it("preserves group, pid, and model for matrix-launched sessions", () => {
+      const session = makeSession({
+        id: "matrix-session-1",
+        pid: 12345,
+        model: "claude-opus-4-6",
+        group: "g-abc123",
+        prompt: "implement caching",
+      });
+      const record = tracker.track(session, "opencode");
 
-      tracker.track(
-        makeSession({
-          id: "real-uuid-session",
-          status: "running",
-          pid: 11111,
-        }),
-        "claude-code",
-      );
+      expect(record.group).toBe("g-abc123");
+      expect(record.pid).toBe(12345);
+      expect(record.model).toBe("claude-opus-4-6");
+      expect(record.prompt).toBe("implement caching");
+      expect(record.adapter).toBe("opencode");
 
-      expect(state.getSession("pending-11111")).toBeUndefined();
-      expect(state.getSession("real-uuid-session")).toBeDefined();
+      // Verify it's retrievable from state
+      const fromState = state.getSession("matrix-session-1");
+      expect(fromState).toBeDefined();
+      expect(fromState?.group).toBe("g-abc123");
     });
   });
 
@@ -132,13 +135,13 @@ describe("SessionTracker", () => {
   describe("removeSession", () => {
     it("removes a session from state", () => {
       tracker.track(
-        makeSession({ id: "pending-55555", status: "running", pid: 55555 }),
+        makeSession({ id: "session-55555", status: "running", pid: 55555 }),
         "claude-code",
       );
-      expect(state.getSession("pending-55555")).toBeDefined();
+      expect(state.getSession("session-55555")).toBeDefined();
 
-      tracker.removeSession("pending-55555");
-      expect(state.getSession("pending-55555")).toBeUndefined();
+      tracker.removeSession("session-55555");
+      expect(state.getSession("session-55555")).toBeUndefined();
     });
   });
 
@@ -267,40 +270,6 @@ describe("SessionTracker", () => {
       expect(state.getSession("oc-session")?.status).toBe("running");
     });
 
-    it("handles pending→UUID resolution via PID match", () => {
-      // pending entry was launched 2 min ago
-      tracker.track(
-        makeSession({
-          id: "pending-99999",
-          status: "running",
-          pid: 99999,
-          startedAt: new Date(Date.now() - 120_000),
-        }),
-        "claude-code",
-      );
-
-      // Adapter returns a resolved session with the same PID but different ID
-      const discovered = [
-        makeDiscovered({
-          id: "real-uuid",
-          status: "running",
-          adapter: "claude-code",
-          pid: 99999,
-        }),
-      ];
-
-      const { sessions, stoppedLaunchIds } = tracker.reconcileAndEnrich(
-        discovered,
-        new Set(["claude-code"]),
-      );
-
-      // pending entry should be cleaned up
-      expect(stoppedLaunchIds).toContain("pending-99999");
-      expect(state.getSession("pending-99999")).toBeUndefined();
-      // Real session should be in results
-      expect(sessions.map((s) => s.id)).toContain("real-uuid");
-    });
-
     it("merges results from multiple adapters", () => {
       const discovered = [
         makeDiscovered({
@@ -350,6 +319,143 @@ describe("SessionTracker", () => {
 
       // Should not try to stop it again
       expect(stoppedLaunchIds).not.toContain("already-stopped");
+    });
+
+    it("keeps session running when fuse is active and PID is alive (#146)", () => {
+      // Create a tracker with fuse engine and live PID
+      const fuseEngine = new FuseEngine(state, { defaultDurationMs: 60_000 });
+      const fuseTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+        fuseEngine,
+      });
+
+      // Session launched 2+ minutes ago (past grace period)
+      fuseTracker.track(
+        makeSession({
+          id: "fused-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 12345,
+          cwd: "/tmp/fuse-test",
+        }),
+        "opencode",
+      );
+
+      // Set a lifecycle fuse for this session
+      fuseEngine.setFuse({
+        directory: "/tmp/fuse-test",
+        sessionId: "fused-session",
+        ttlMs: 4 * 60 * 60 * 1000,
+        label: "lifecycle:opencode:fused-se",
+      });
+
+      // Adapter returns empty (opencode doesn't persist running sessions)
+      const { sessions, stoppedLaunchIds } = fuseTracker.reconcileAndEnrich(
+        [],
+        new Set(["opencode"]),
+      );
+
+      // Session must NOT be marked stopped — fuse + PID alive protects it
+      expect(stoppedLaunchIds).not.toContain("fused-session");
+      expect(sessions.map((s) => s.id)).toContain("fused-session");
+      expect(state.getSession("fused-session")?.status).toBe("running");
+
+      fuseEngine.shutdown();
+    });
+
+    it("marks session stopped when fuse is active but PID is dead (#146)", () => {
+      const fuseEngine = new FuseEngine(state, { defaultDurationMs: 60_000 });
+      const deadPidTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => false, // PID is dead
+        fuseEngine,
+      });
+
+      deadPidTracker.track(
+        makeSession({
+          id: "dead-pid-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 99999,
+          cwd: "/tmp/dead-test",
+        }),
+        "opencode",
+      );
+
+      // Fuse exists but PID is dead — should still be marked stopped
+      fuseEngine.setFuse({
+        directory: "/tmp/dead-test",
+        sessionId: "dead-pid-session",
+        ttlMs: 4 * 60 * 60 * 1000,
+      });
+
+      const { stoppedLaunchIds } = deadPidTracker.reconcileAndEnrich(
+        [],
+        new Set(["opencode"]),
+      );
+
+      expect(stoppedLaunchIds).toContain("dead-pid-session");
+      expect(state.getSession("dead-pid-session")?.status).toBe("stopped");
+
+      fuseEngine.shutdown();
+    });
+
+    it("marks session stopped without fuse even if PID is alive (#146)", () => {
+      // No fuse engine — falls back to original behavior
+      const noFuseTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+      });
+
+      noFuseTracker.track(
+        makeSession({
+          id: "no-fuse-session",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 12345,
+        }),
+        "claude-code",
+      );
+
+      const { stoppedLaunchIds } = noFuseTracker.reconcileAndEnrich(
+        [],
+        new Set(["claude-code"]),
+      );
+
+      // Without a fuse engine, session should be marked stopped (existing behavior)
+      expect(stoppedLaunchIds).toContain("no-fuse-session");
+      expect(state.getSession("no-fuse-session")?.status).toBe("stopped");
+    });
+
+    it("follows grace period logic when no fuse exists (#146)", () => {
+      const fuseEngine = new FuseEngine(state, { defaultDurationMs: 60_000 });
+      const fuseTracker = new SessionTracker(state, {
+        adapters: {},
+        isProcessAlive: () => true,
+        fuseEngine,
+      });
+
+      // Session past grace period, PID alive, but NO fuse set
+      fuseTracker.track(
+        makeSession({
+          id: "no-fuse-old",
+          status: "running",
+          startedAt: new Date(Date.now() - 120_000),
+          pid: 12345,
+        }),
+        "opencode",
+      );
+
+      const { stoppedLaunchIds } = fuseTracker.reconcileAndEnrich(
+        [],
+        new Set(["opencode"]),
+      );
+
+      // No fuse for this session — should be marked stopped
+      expect(stoppedLaunchIds).toContain("no-fuse-old");
+
+      fuseEngine.shutdown();
     });
   });
 
@@ -408,6 +514,66 @@ describe("SessionTracker", () => {
       const dead = tracker.cleanupDeadLaunches();
       expect(dead).toHaveLength(0);
       expect(state.getSession("s1")?.status).toBe("running");
+    });
+  });
+
+  describe("getStaleSessionIds (#122)", () => {
+    it("returns IDs of running sessions older than threshold", () => {
+      tracker.track(
+        makeSession({
+          id: "old-running",
+          status: "running",
+          startedAt: new Date(Date.now() - 10 * 60 * 1000), // 10 min ago
+        }),
+        "claude-code",
+      );
+      tracker.track(
+        makeSession({
+          id: "new-running",
+          status: "running",
+          startedAt: new Date(), // just now
+        }),
+        "claude-code",
+      );
+
+      const stale = tracker.getStaleSessionIds(5 * 60 * 1000);
+      expect(stale).toContain("old-running");
+      expect(stale).not.toContain("new-running");
+    });
+
+    it("ignores stopped sessions", () => {
+      tracker.track(
+        makeSession({
+          id: "old-stopped",
+          status: "stopped",
+          startedAt: new Date(Date.now() - 10 * 60 * 1000),
+        }),
+        "claude-code",
+      );
+
+      const stale = tracker.getStaleSessionIds(5 * 60 * 1000);
+      expect(stale).not.toContain("old-stopped");
+    });
+  });
+
+  describe("markStuck (#122)", () => {
+    it("marks a running session as error", () => {
+      tracker.track(
+        makeSession({ id: "stuck-1", status: "running", pid: 12345 }),
+        "claude-code",
+      );
+
+      const result = tracker.markStuck("stuck-1");
+      expect(result).toBeDefined();
+      expect(result?.status).toBe("error");
+      expect(result?.stoppedAt).toBeDefined();
+
+      // Verify persisted in state
+      expect(state.getSession("stuck-1")?.status).toBe("error");
+    });
+
+    it("returns undefined for unknown session", () => {
+      expect(tracker.markStuck("unknown")).toBeUndefined();
     });
   });
 
