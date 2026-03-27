@@ -85,6 +85,18 @@ describe("launch --adapter flag (#74)", () => {
     // Should reference the requested adapter in the error, not silently use claude-code
     expect(stderr).not.toContain("Launched session");
   });
+
+  it("rejects codex-acp with a targeted experimental message", async () => {
+    const { stderr } = await run([
+      "launch",
+      "--adapter",
+      "codex-acp",
+      "-p",
+      "test",
+    ]);
+    expect(stderr).toContain("not publicly shipped yet");
+    expect(stderr).toContain("use 'codex' for now");
+  });
 });
 
 describe("shortId (#71)", () => {
