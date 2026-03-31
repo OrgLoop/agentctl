@@ -266,6 +266,46 @@ describe("expandMatrix", () => {
     expect(slots[1].baseBranch).toBeUndefined();
   });
 
+  it("propagates camelCase baseBranch from matrix YAML", () => {
+    const matrix: MatrixFile = {
+      prompt: "test",
+      matrix: [
+        {
+          adapter: "opencode",
+          model: "kimi",
+          branch: "auto/ENG-1234-kimi",
+          baseBranch: "research/ENG-1234",
+        },
+        { adapter: "claude-code" },
+      ],
+    };
+
+    const slots = expandMatrix(matrix);
+    expect(slots[0]).toEqual({
+      adapter: "opencode",
+      model: "kimi",
+      branch: "auto/ENG-1234-kimi",
+      baseBranch: "research/ENG-1234",
+    });
+    expect(slots[1].baseBranch).toBeUndefined();
+  });
+
+  it("prefers snake_case base_branch over camelCase baseBranch", () => {
+    const matrix: MatrixFile = {
+      prompt: "test",
+      matrix: [
+        {
+          adapter: "opencode",
+          base_branch: "research/from-snake",
+          baseBranch: "research/from-camel",
+        },
+      ],
+    };
+
+    const slots = expandMatrix(matrix);
+    expect(slots[0].baseBranch).toBe("research/from-snake");
+  });
+
   it("propagates base_branch across array model expansion", () => {
     const matrix: MatrixFile = {
       prompt: "test",

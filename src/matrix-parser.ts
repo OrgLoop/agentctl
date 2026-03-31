@@ -11,8 +11,9 @@ export interface MatrixEntry {
   model?: string | string[];
   /** Branch name for this entry's worktree */
   branch?: string;
-  /** Base branch to create worktree from (default: main) */
+  /** Base branch to create worktree from (default: main). Accepts both snake_case and camelCase. */
   base_branch?: string;
+  baseBranch?: string;
 }
 
 /** Top-level matrix file schema */
@@ -86,7 +87,8 @@ export function expandMatrix(matrix: MatrixFile): AdapterSlot[] {
     // Carry over optional per-entry fields
     const extra: Partial<AdapterSlot> = {};
     if (entry.branch) extra.branch = entry.branch;
-    if (entry.base_branch) extra.baseBranch = entry.base_branch;
+    const baseBranch = entry.base_branch || entry.baseBranch;
+    if (baseBranch) extra.baseBranch = baseBranch;
 
     if (models.length === 0) {
       // No model specified — single slot
