@@ -405,7 +405,7 @@ async function isSocketAlive(sockPath: string): Promise<boolean> {
 
 // --- Request handler ---
 
-interface HandlerContext {
+export interface HandlerContext {
   sessionTracker: SessionTracker;
   lockManager: LockManager;
   fuseEngine: FuseEngine;
@@ -418,7 +418,7 @@ interface HandlerContext {
   emitSessionStoppedWebhook: (record: SessionRecord) => void;
 }
 
-function createRequestHandler(ctx: HandlerContext) {
+export function createRequestHandler(ctx: HandlerContext) {
   return async (req: DaemonRequest): Promise<unknown> => {
     const params = (req.params || {}) as Record<string, unknown>;
 
@@ -569,60 +569,73 @@ function createRequestHandler(ctx: HandlerContext) {
       }
 
       case "session.peek": {
-        // Auto-detect adapter from tracked session, fall back to param or claude-code
         const tracked = ctx.sessionTracker.getSession(params.id as string);
-        const adapterName =
-          (params.adapter as string) || tracked?.adapter || "claude-code";
-        const adapter = ctx.adapters[adapterName];
-        if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
+        const adapterName = (params.adapter as string) || tracked?.adapter;
         // Use the full session ID if we resolved it from the tracker
         const peekId = tracked?.id || (params.id as string);
-        try {
-          return await adapter.peek(peekId, {
-            lines: params.lines as number | undefined,
-          });
-        } catch (peekErr) {
-          // Fallback: read assistant output from launch log (#135)
-          const logPath = tracked?.meta?.logPath as string | undefined;
-          if (logPath) {
-            try {
-              const logContent = await fs.readFile(logPath, "utf-8");
-              const assistantMessages: string[] = [];
-              for (const line of logContent.split("\n")) {
-                if (!line.trim()) continue;
-                try {
-                  const msg = JSON.parse(line);
-                  if (msg.type === "assistant" && msg.message?.content) {
-                    const text =
-                      typeof msg.message.content === "string"
-                        ? msg.message.content
-                        : Array.isArray(msg.message.content)
+        const peekLines = params.lines as number | undefined;
+
+        if (adapterName) {
+          // Adapter is known — use it directly, with launch-log fallback (#135)
+          const adapter = ctx.adapters[adapterName];
+          if (!adapter) throw new Error(`Unknown adapter: ${adapterName}`);
+          try {
+            return await adapter.peek(peekId, { lines: peekLines });
+          } catch (peekErr) {
+            // Fallback: read assistant output from launch log (#135)
+            const logPath = tracked?.meta?.logPath as string | undefined;
+            if (logPath) {
+              try {
+                const logContent = await fs.readFile(logPath, "utf-8");
+                const assistantMessages: string[] = [];
+                for (const line of logContent.split("\n")) {
+                  if (!line.trim()) continue;
+                  try {
+                    const msg = JSON.parse(line);
+                    if (msg.type === "assistant" && msg.message?.content) {
+                      const text =
+                        typeof msg.message.content === "string"
                           ? msg.message.content
-                              .filter(
-                                (b: { type: string; text?: string }) =>
-                                  b.type === "text" && b.text,
-                              )
-                              .map(
-                                (b: { type: string; text?: string }) => b.text,
-                              )
-                              .join("\n")
-                          : "";
-                    if (text) assistantMessages.push(text);
+                          : Array.isArray(msg.message.content)
+                            ? msg.message.content
+                                .filter(
+                                  (b: { type: string; text?: string }) =>
+                                    b.type === "text" && b.text,
+                                )
+                                .map(
+                                  (b: { type: string; text?: string }) =>
+                                    b.text,
+                                )
+                                .join("\n")
+                            : "";
+                      if (text) assistantMessages.push(text);
+                    }
+                  } catch {
+                    // skip malformed
                   }
-                } catch {
-                  // skip malformed
                 }
+                if (assistantMessages.length > 0) {
+                  const maxLines = peekLines ?? 20;
+                  return assistantMessages.slice(-maxLines).join("\n---\n");
+                }
+              } catch {
+                // log file unreadable — fall through to original error
               }
-              if (assistantMessages.length > 0) {
-                const maxLines = (params.lines as number | undefined) ?? 20;
-                return assistantMessages.slice(-maxLines).join("\n---\n");
-              }
-            } catch {
-              // log file unreadable — fall through to original error
             }
+            throw peekErr;
           }
-          throw peekErr;
         }
+
+        // Adapter unknown (session not tracked by daemon, no --adapter flag) —
+        // fan out to all adapters, same as session.status does (#fix-peek-stopped)
+        for (const [, adapter] of Object.entries(ctx.adapters)) {
+          try {
+            return await adapter.peek(peekId, { lines: peekLines });
+          } catch {
+            // try next adapter
+          }
+        }
+        throw new Error(`Session not found: ${peekId}`);
       }
 
       case "session.launch": {
