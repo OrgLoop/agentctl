@@ -25,11 +25,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OrgLoop/agentctl.git"
+    "url": "git+https://github.com/orgloop/agentctl.git"
   },
-  "homepage": "https://github.com/c-h-/agentctl#readme",
+  "homepage": "https://github.com/orgloop/agentctl#readme",
   "bugs": {
-    "url": "https://github.com/c-h-/agentctl/issues"
+    "url": "https://github.com/orgloop/agentctl/issues"
   },
   "keywords": [
     "cli",
@@ -46,15 +46,15 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
-    "@types/node": "^25.2.3",
     "commander": "^14.0.3",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.18",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.2"
+    "@biomejs/biome": "^2.4.2",
+    "@types/node": "^25.2.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   },
   "publishConfig": {
     "access": "public"
