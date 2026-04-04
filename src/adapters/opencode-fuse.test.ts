@@ -90,19 +90,24 @@ async function collectEvents(
   const gen = adapter.events()[Symbol.asyncIterator]();
 
   const deadline = Date.now() + timeoutMs;
+  // Reuse the pending gen.next() promise across timeout slices — calling gen.next()
+  // again while one is in-flight queues a second call, causing the first resolved
+  // value (e.g. a pid-death event) to be silently discarded.
+  let nextPromise = gen.next();
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
 
     const result = await Promise.race([
-      gen.next(),
+      nextPromise,
       sleep(Math.min(remaining, 100)).then(() => "timeout" as const),
     ]);
 
-    if (result === "timeout") continue;
+    if (result === "timeout") continue; // keep the same nextPromise
     if (result.done) break;
 
     events.push(result.value);
+    nextPromise = gen.next(); // advance only after consuming a value
     if (opts.until?.(result.value)) break;
     if (events.length >= maxEvents) break;
   }
