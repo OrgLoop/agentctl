@@ -151,7 +151,19 @@ export function computeProjectHash(directory: string): string {
 /** Minimum runtime (seconds) for a session to be considered successful.
  *  Exits faster than this with code 0 are treated as failures (e.g.
  *  ProviderModelNotFoundError which opencode exits 0 on). */
-const MIN_RUNTIME_SECONDS = 2;
+const MIN_RUNTIME_SECONDS = 5;
+
+/**
+ * Check whether a model identifier is compatible with opencode.
+ *
+ * Provider-prefixed models (e.g. "openai/gpt-5.4", "anthropic/claude-opus-4-6")
+ * are NOT supported — opencode manages its own provider routing and expects
+ * bare model names (e.g. "gpt-4o", "claude-sonnet-4-5-20250514").
+ */
+export function isModelCompatible(model: string): boolean {
+  // Provider-prefixed models contain a slash (e.g. "openai/gpt-5.4")
+  return !model.includes("/");
+}
 
 export function generateWrapperScript(
   opencodeBin: string,
@@ -379,8 +391,13 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
     const args = ["run"];
-    if (opts.model) {
-      args.push("--model", opts.model);
+    // Only pass --model for models opencode can handle.
+    // Provider-prefixed models (e.g. "openai/gpt-5.4") inherited from the
+    // caller environment are silently dropped so opencode uses its own default.
+    const model =
+      opts.model && isModelCompatible(opts.model) ? opts.model : undefined;
+    if (model) {
+      args.push("--model", model);
     }
 
     // For large prompts, pipe via stdin instead of CLI args to avoid
@@ -447,7 +464,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         sessionId,
         pid,
         cwd,
-        model: opts.model,
+        model,
         prompt: opts.prompt.slice(0, 200),
         adapter: this.id,
       });
@@ -459,7 +476,7 @@ export class OpenCodeAdapter implements AgentAdapter {
       status: "running",
       startedAt: now,
       cwd,
-      model: opts.model,
+      model,
       prompt: opts.prompt.slice(0, 200),
       pid,
       meta: {

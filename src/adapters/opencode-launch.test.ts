@@ -30,9 +30,8 @@ vi.mock("../utils/resolve-binary.js", () => ({
 }));
 
 // Import after mocks are declared (vitest hoists vi.mock)
-const { OpenCodeAdapter, generateWrapperScript } = await import(
-  "./opencode.js"
-);
+const { OpenCodeAdapter, generateWrapperScript, isModelCompatible } =
+  await import("./opencode.js");
 
 let tmpDir: string;
 let sessionsMetaDir: string;
@@ -85,7 +84,7 @@ describe("generateWrapperScript", () => {
     expect(script).toContain("'it'\\''s a bug'");
   });
 
-  it("detects fast exits (< 2s) and overrides exit code 0 to 1", () => {
+  it("detects fast exits (< 5s) and overrides exit code 0 to 1", () => {
     const script = generateWrapperScript(
       "/usr/local/bin/opencode",
       ["run", "--", "test"],
@@ -95,9 +94,9 @@ describe("generateWrapperScript", () => {
     expect(script).toContain("START=$(date +%s)");
     expect(script).toContain("END=$(date +%s)");
     expect(script).toContain("ELAPSED=$((END - START))");
-    // If exit code is 0 and runtime < threshold, override to 1
-    expect(script).toMatch(
-      /if \[ "\$EC" -eq 0 \] && \[ "\$ELAPSED" -lt \d+ \]; then EC=1; fi/,
+    // If exit code is 0 and runtime < 5s threshold, override to 1
+    expect(script).toContain(
+      'if [ "$EC" -eq 0 ] && [ "$ELAPSED" -lt 5 ]; then EC=1; fi',
     );
   });
 });
@@ -208,5 +207,54 @@ describe("OpenCodeAdapter launch", () => {
     expect(meta.model).toBe("gpt-4o");
     expect(meta.prompt).toBe("fix the bug");
     expect(meta.adapter).toBe("opencode");
+  });
+
+  it("drops provider-prefixed model and uses no --model flag", async () => {
+    const session = await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      model: "openai/gpt-5.4",
+      cwd: tmpDir,
+    });
+
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    // Provider-prefixed model should NOT be passed to opencode
+    expect(wrapperContent).not.toContain("'--model'");
+    expect(wrapperContent).not.toContain("openai/gpt-5.4");
+
+    // Session metadata should reflect no model (opencode picks its own default)
+    expect(session.model).toBeUndefined();
+  });
+
+  it("passes compatible bare model names through to opencode", async () => {
+    const session = await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      model: "deepseek-r1",
+      cwd: tmpDir,
+    });
+
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).toContain("'--model'");
+    expect(wrapperContent).toContain("'deepseek-r1'");
+    expect(session.model).toBe("deepseek-r1");
+  });
+});
+
+describe("isModelCompatible", () => {
+  it("accepts bare model names", () => {
+    expect(isModelCompatible("gpt-4o")).toBe(true);
+    expect(isModelCompatible("deepseek-r1")).toBe(true);
+    expect(isModelCompatible("claude-sonnet-4-5-20250514")).toBe(true);
+  });
+
+  it("rejects provider-prefixed model names", () => {
+    expect(isModelCompatible("openai/gpt-5.4")).toBe(false);
+    expect(isModelCompatible("anthropic/claude-opus-4-6")).toBe(false);
+    expect(isModelCompatible("google/gemini-pro")).toBe(false);
   });
 });
