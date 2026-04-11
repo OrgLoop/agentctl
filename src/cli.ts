@@ -668,8 +668,10 @@ program
       }
     }
 
-    // --- Parallel launch path ---
-    if (slots.length > 1) {
+    // --- Parallel / matrix launch path ---
+    // Always use orchestrateLaunch for matrix files (even single-entry),
+    // so that per-entry branch/base_branch fields are honored (#39).
+    if (slots.length > 1 || opts.matrix) {
       const daemonRunning = await ensureDaemon();
 
       try {

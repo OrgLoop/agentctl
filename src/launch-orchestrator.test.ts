@@ -1,8 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentAdapter } from "./core/types.js";
 import {
   type AdapterSlot,
   branchName,
   generateGroupId,
+  orchestrateLaunch,
   parseAdapterSlots,
   slotSuffix,
   uniqueSlotSuffixes,
@@ -222,5 +229,120 @@ describe("parseAdapterSlots", () => {
       { adapter: "claude-code", model: "opus" },
       { adapter: "codex" },
     ]);
+  });
+});
+
+// --- orchestrateLaunch integration tests ---
+
+const execFileAsync = promisify(execFile);
+
+/** Create a bare-minimum git repo with an initial commit */
+async function createTempRepo(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-orch-test-"));
+  await execFileAsync("git", ["init", dir]);
+  await execFileAsync("git", [
+    "-C",
+    dir,
+    "config",
+    "user.email",
+    "test@test.com",
+  ]);
+  await execFileAsync("git", ["-C", dir, "config", "user.name", "Test"]);
+  await execFileAsync("git", [
+    "-C",
+    dir,
+    "commit",
+    "--allow-empty",
+    "-m",
+    "init",
+  ]);
+  return dir;
+}
+
+/** A fake adapter that records launch calls without spawning anything */
+function fakeAdapter(): AgentAdapter & { launched: Array<{ cwd: string }> } {
+  const launched: Array<{ cwd: string }> = [];
+  return {
+    name: "fake",
+    launched,
+    async list() {
+      return [];
+    },
+    async launch(opts) {
+      launched.push({ cwd: opts.cwd });
+      return {
+        id: "fake-session-1",
+        adapter: "fake",
+        status: "running" as const,
+        cwd: opts.cwd,
+        startedAt: new Date(),
+        pid: 99999,
+        meta: {},
+      };
+    },
+    async stop() {},
+    async send() {},
+    async logs() {
+      return "";
+    },
+  };
+}
+
+describe("orchestrateLaunch — single-entry matrix (#39)", () => {
+  let repoDir: string;
+
+  beforeEach(async () => {
+    repoDir = await createTempRepo();
+  });
+
+  afterEach(async () => {
+    // Clean up worktrees before removing repo
+    try {
+      await execFileAsync("git", ["-C", repoDir, "worktree", "prune"]);
+    } catch {}
+    // Remove any sibling worktree directories
+    const parent = path.dirname(repoDir);
+    const base = path.basename(repoDir);
+    const entries = await fs.readdir(parent);
+    for (const e of entries) {
+      if (e.startsWith(`${base}-`)) {
+        await fs.rm(path.join(parent, e), { recursive: true, force: true });
+      }
+    }
+    await fs.rm(repoDir, { recursive: true, force: true });
+  });
+
+  it("creates a worktree for a single slot with branch field", async () => {
+    const adapter = fakeAdapter();
+    const result = await orchestrateLaunch({
+      slots: [{ adapter: "fake", branch: "test/single-branch" }],
+      prompt: "test prompt",
+      cwd: repoDir,
+      adapters: { fake: adapter },
+    });
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].error).toBeUndefined();
+    expect(result.results[0].branch).toBe("test/single-branch");
+    // The adapter should have been launched in the worktree, not the original repo
+    expect(adapter.launched[0].cwd).not.toBe(repoDir);
+    expect(adapter.launched[0].cwd).toContain("test-single-branch");
+  });
+
+  it("creates a worktree for a single slot without branch (auto-generated)", async () => {
+    const adapter = fakeAdapter();
+    const result = await orchestrateLaunch({
+      slots: [{ adapter: "fake" }],
+      prompt: "test prompt",
+      cwd: repoDir,
+      adapters: { fake: adapter },
+    });
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].error).toBeUndefined();
+    // Branch is auto-generated as try/<groupId>/<suffix>
+    expect(result.results[0].branch).toMatch(/^try\/g-[a-f0-9]{6}\/fake$/);
+    // Launched in worktree, not original repo
+    expect(adapter.launched[0].cwd).not.toBe(repoDir);
   });
 });
