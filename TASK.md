@@ -1,28 +1,42 @@
-# TASK: Fix single-entry matrix ignoring branch/base_branch (#39)
+# Fix: opencode adapter defaults to wrong model
 
-## Bug
+**Issue:** https://github.com/c-h-personal/agentctl/issues/16
+**Closes:** #16
 
-When `agentctl launch --matrix file.yaml` has a single matrix entry with `branch` and `base_branch` fields, those fields are silently ignored. The agent launches in the `cwd` directory (e.g., the main repo checkout) instead of an isolated worktree.
+## Problem
 
-## Root Cause
+`agentctl launch opencode` ignores the workspace/default opencode model configuration and selects `openai/gpt-5.4` as the model. If `OPENAI_API_KEY` is not set, the session fails silently — exits with no error message, no output.
 
-In `src/cli.ts` around line ~672: `if (slots.length > 1)` gates the parallel path which calls `orchestrateLaunch()` → `createWorktree()`. A single-entry matrix falls to the single-adapter path, which only creates worktrees when `--worktree` is passed as an explicit CLI flag.
+This affects every opencode launch that doesn't pass an explicit `--model` flag.
 
-## Fix
+Related reports: #155, #148, #159 (all same root cause).
 
-The single-entry matrix path must also honor `branch` and `base_branch` from the matrix entry. When a matrix entry specifies a branch, worktree creation should happen regardless of whether it's a single or multi-entry matrix.
+## What to Fix
 
-Approaches:
-1. Remove the `slots.length > 1` guard entirely — always use `orchestrateLaunch()` for matrix entries
-2. OR: in the single-entry fallback path, extract `branch`/`base_branch` from the slot and pass them through to worktree creation
+Fix the model resolution order in the opencode adapter to:
 
-Option 1 is cleaner — if someone is using `--matrix`, they want the full matrix behavior.
+1. **Explicit `--model` flag** (highest priority — already works)
+2. **Workspace config** (opencode's own config file if present)
+3. **Environment-based default** (e.g., from `OPENCODE_MODEL` env var)
+4. **Sensible fallback** (a model that's likely to work — e.g., `anthropic/claude-sonnet-4-6` if Anthropic key is set, or fail loudly)
 
-## Testing
+Additionally:
+- **Fail loudly** if the selected model's provider API key is missing. No silent exits.
+- Print a clear error: `"Error: Model 'openai/gpt-5.4' requires OPENAI_API_KEY which is not set. Pass --model to override."`
 
-- Unit test: single-entry matrix with `branch` field → verify worktree is created
-- Unit test: single-entry matrix without `branch` → verify it still works (uses cwd)
-- Check existing multi-entry matrix tests still pass
-- Run `agentctl launch --help` to verify no flag conflicts
+## Approach
 
-## COMMIT AND PUSH before finishing.
+1. Find the opencode adapter (likely `src/adapters/opencode/` or similar)
+2. Find where the model is resolved/selected
+3. Fix the resolution order
+4. Add API key validation — check that the provider's key exists before launching
+5. Write unit tests for model resolution with different configs
+
+## Requirements
+
+- Model resolution: `--model` > workspace config > env var > sensible fallback
+- Fail loudly with actionable error if provider key is missing
+- Write tests for resolution order + missing key scenarios
+- Run typecheck and lint before finishing
+
+COMMIT AND PUSH before finishing.

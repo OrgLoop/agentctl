@@ -135,6 +135,8 @@ export interface OpenCodeAdapterOpts {
   masterTimeoutMs?: number;
   /** Override poll interval for testing (default: 15s) */
   pollIntervalMs?: number;
+  /** Override environment for model resolution + API key validation (for testing) */
+  launchEnvOverride?: Record<string, string | undefined>;
 }
 
 /**
@@ -163,6 +165,137 @@ const MIN_RUNTIME_SECONDS = 5;
 export function isModelCompatible(model: string): boolean {
   // Provider-prefixed models contain a slash (e.g. "openai/gpt-5.4")
   return !model.includes("/");
+}
+
+/** Known provider → required API key environment variable */
+export const PROVIDER_API_KEY_MAP: Record<string, string> = {
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  google: "GOOGLE_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+  cohere: "COHERE_API_KEY",
+  groq: "GROQ_API_KEY",
+  xai: "XAI_API_KEY",
+};
+
+/**
+ * Extract the provider name from a model identifier.
+ * "openai/gpt-5.4" → "openai"
+ * "gpt-4o" → undefined (bare model, provider unknown)
+ */
+export function getProviderFromModel(model: string): string | undefined {
+  if (model.includes("/")) return model.split("/")[0];
+  return undefined;
+}
+
+/**
+ * Return the API key environment variable name required for a provider.
+ * Falls back to "<PROVIDER>_API_KEY" for unknown providers.
+ */
+export function getApiKeyEnvVar(provider: string): string {
+  return (
+    PROVIDER_API_KEY_MAP[provider.toLowerCase()] ??
+    `${provider.toUpperCase()}_API_KEY`
+  );
+}
+
+/**
+ * Validate that the required API key is present for a model.
+ * Throws with an actionable error message if the key is missing.
+ * No-ops for bare model names where the provider cannot be determined.
+ */
+export function validateApiKeyForModel(
+  model: string,
+  env: Record<string, string | undefined> = process.env as Record<
+    string,
+    string | undefined
+  >,
+): void {
+  const provider = getProviderFromModel(model);
+  if (!provider) return;
+  const envVar = getApiKeyEnvVar(provider);
+  if (!env[envVar]) {
+    throw new Error(
+      `Model '${model}' requires ${envVar} which is not set. Pass --model to override.`,
+    );
+  }
+}
+
+/**
+ * Read the model from opencode's workspace or user config file.
+ * Checks (in order):
+ *   <cwd>/opencode.json
+ *   ~/.config/opencode/config.json
+ */
+export async function readWorkspaceModel(
+  cwd: string,
+): Promise<string | undefined> {
+  const candidates = [
+    path.join(cwd, "opencode.json"),
+    path.join(os.homedir(), ".config", "opencode", "config.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const raw = await fs.readFile(candidate, "utf-8");
+      const cfg = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof cfg.model === "string" && cfg.model) return cfg.model;
+    } catch {
+      // Not found or unparseable — try next
+    }
+  }
+  return undefined;
+}
+
+/** Sensible fallback models tried in order based on available API keys */
+export const MODEL_FALLBACKS: { keyVar: string; model: string }[] = [
+  { keyVar: "ANTHROPIC_API_KEY", model: "claude-sonnet-4-6" },
+  { keyVar: "OPENAI_API_KEY", model: "gpt-4o" },
+];
+
+/**
+ * Resolve the model for an opencode launch using a priority chain:
+ *
+ * 1. opts.model (bare, no provider prefix) — used directly
+ * 2. opts.model (provider-prefixed) — validates API key, then strips prefix
+ * 3. Workspace config (opencode.json in cwd or ~/.config/opencode/config.json)
+ * 4. OPENCODE_MODEL environment variable
+ * 5. Sensible fallback based on available API keys (Anthropic, then OpenAI)
+ *
+ * Throws with a clear error message if a provider-prefixed model is given but
+ * the required API key is not set.
+ */
+export async function resolveOpenCodeModel(
+  opts: { model?: string; cwd?: string },
+  env: Record<string, string | undefined>,
+): Promise<string | undefined> {
+  if (opts.model) {
+    if (isModelCompatible(opts.model)) {
+      // Bare model — highest priority, use directly
+      return opts.model;
+    }
+    // Provider-prefixed: validate API key first (throws if missing),
+    // then strip the provider prefix so opencode receives a bare model name.
+    validateApiKeyForModel(opts.model, env);
+    return opts.model.split("/").slice(1).join("/");
+  }
+
+  const cwd = opts.cwd ?? process.cwd();
+
+  // Workspace config
+  const workspaceModel = await readWorkspaceModel(cwd);
+  if (workspaceModel) return workspaceModel;
+
+  // OPENCODE_MODEL env var
+  const envModel = env.OPENCODE_MODEL;
+  if (envModel) return envModel;
+
+  // Sensible fallback based on available API keys
+  for (const { keyVar, model } of MODEL_FALLBACKS) {
+    if (env[keyVar]) return model;
+  }
+
+  return undefined;
 }
 
 export function generateWrapperScript(
@@ -210,6 +343,9 @@ export class OpenCodeAdapter implements AgentAdapter {
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly masterTimeoutMs: number;
   private readonly pollIntervalMs: number;
+  private readonly launchEnvOverride:
+    | Record<string, string | undefined>
+    | undefined;
 
   /** Active fuses for launched sessions — keyed by sessionId */
   private readonly fuses = new Map<string, SessionFuse>();
@@ -228,6 +364,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     this.isProcessAlive = opts?.isProcessAlive || defaultIsProcessAlive;
     this.masterTimeoutMs = opts?.masterTimeoutMs ?? DEFAULT_MASTER_TIMEOUT_MS;
     this.pollIntervalMs = opts?.pollIntervalMs ?? POLL_INTERVAL_MS;
+    this.launchEnvOverride = opts?.launchEnvOverride;
   }
 
   async discover(): Promise<DiscoveredSession[]> {
@@ -390,12 +527,25 @@ export class OpenCodeAdapter implements AgentAdapter {
   }
 
   async launch(opts: LaunchOpts): Promise<AgentSession> {
+    const cwd = opts.cwd || process.cwd();
+
+    // Build env for model resolution: process.env + explicit opts.env overrides,
+    // or use launchEnvOverride when set (testing / isolated environments).
+    const resolutionEnv: Record<string, string | undefined> =
+      this.launchEnvOverride !== undefined
+        ? this.launchEnvOverride
+        : {
+            ...(process.env as Record<string, string | undefined>),
+            ...(opts.env ?? {}),
+          };
+
+    // Resolve model through priority chain (may throw if API key is missing)
+    const model = await resolveOpenCodeModel(
+      { model: opts.model, cwd },
+      resolutionEnv,
+    );
+
     const args = ["run"];
-    // Only pass --model for models opencode can handle.
-    // Provider-prefixed models (e.g. "openai/gpt-5.4") inherited from the
-    // caller environment are silently dropped so opencode uses its own default.
-    const model =
-      opts.model && isModelCompatible(opts.model) ? opts.model : undefined;
     if (model) {
       args.push("--model", model);
     }
@@ -416,7 +566,6 @@ export class OpenCodeAdapter implements AgentAdapter {
     }
 
     const env = buildSpawnEnv(opts.env);
-    const cwd = opts.cwd || process.cwd();
 
     await fs.mkdir(this.sessionsMetaDir, { recursive: true });
 

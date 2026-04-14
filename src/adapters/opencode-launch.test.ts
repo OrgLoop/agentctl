@@ -52,6 +52,8 @@ beforeEach(async () => {
     sessionsMetaDir,
     getPids: async () => new Map(),
     isProcessAlive: () => false,
+    // Isolate from real process.env so model resolution is deterministic
+    launchEnvOverride: {},
   });
 });
 
@@ -209,8 +211,29 @@ describe("OpenCodeAdapter launch", () => {
     expect(meta.adapter).toBe("opencode");
   });
 
-  it("drops provider-prefixed model and uses no --model flag", async () => {
-    const session = await adapter.launch({
+  it("throws if provider-prefixed model is given and its API key is missing", async () => {
+    await expect(
+      adapter.launch({
+        adapter: "opencode",
+        prompt: "fix the bug",
+        model: "openai/gpt-5.4",
+        cwd: tmpDir,
+      }),
+    ).rejects.toThrow(
+      "Model 'openai/gpt-5.4' requires OPENAI_API_KEY which is not set. Pass --model to override.",
+    );
+  });
+
+  it("strips provider prefix and passes bare model when API key is present", async () => {
+    const adapterWithKey = new OpenCodeAdapter({
+      storageDir: path.join(tmpDir, "storage"),
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: () => false,
+      launchEnvOverride: { OPENAI_API_KEY: "sk-test" },
+    });
+
+    const session = await adapterWithKey.launch({
       adapter: "opencode",
       prompt: "fix the bug",
       model: "openai/gpt-5.4",
@@ -220,12 +243,11 @@ describe("OpenCodeAdapter launch", () => {
     const wrapperPath = spawnCalls[0].args[0];
     const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
 
-    // Provider-prefixed model should NOT be passed to opencode
-    expect(wrapperContent).not.toContain("'--model'");
-    expect(wrapperContent).not.toContain("openai/gpt-5.4");
-
-    // Session metadata should reflect no model (opencode picks its own default)
-    expect(session.model).toBeUndefined();
+    // Bare model name (without provider prefix) should be passed
+    expect(wrapperContent).toContain("'--model'");
+    expect(wrapperContent).toContain("'gpt-5.4'");
+    expect(wrapperContent).not.toContain("openai/");
+    expect(session.model).toBe("gpt-5.4");
   });
 
   it("passes compatible bare model names through to opencode", async () => {
@@ -242,6 +264,72 @@ describe("OpenCodeAdapter launch", () => {
     expect(wrapperContent).toContain("'--model'");
     expect(wrapperContent).toContain("'deepseek-r1'");
     expect(session.model).toBe("deepseek-r1");
+  });
+
+  it("uses OPENCODE_MODEL env var when no opts.model is set", async () => {
+    const adapterWithEnvModel = new OpenCodeAdapter({
+      storageDir: path.join(tmpDir, "storage"),
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: () => false,
+      launchEnvOverride: { OPENCODE_MODEL: "gemma-3" },
+    });
+
+    const session = await adapterWithEnvModel.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      cwd: tmpDir,
+    });
+
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).toContain("'--model'");
+    expect(wrapperContent).toContain("'gemma-3'");
+    expect(session.model).toBe("gemma-3");
+  });
+
+  it("uses workspace config model when no opts.model or OPENCODE_MODEL", async () => {
+    await fs.writeFile(
+      path.join(tmpDir, "opencode.json"),
+      JSON.stringify({ model: "claude-opus-4-5" }),
+    );
+
+    const session = await adapter.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      cwd: tmpDir,
+    });
+
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).toContain("'--model'");
+    expect(wrapperContent).toContain("'claude-opus-4-5'");
+    expect(session.model).toBe("claude-opus-4-5");
+  });
+
+  it("uses sensible fallback when Anthropic key is available", async () => {
+    const adapterWithKey = new OpenCodeAdapter({
+      storageDir: path.join(tmpDir, "storage"),
+      sessionsMetaDir,
+      getPids: async () => new Map(),
+      isProcessAlive: () => false,
+      launchEnvOverride: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    });
+
+    const session = await adapterWithKey.launch({
+      adapter: "opencode",
+      prompt: "fix the bug",
+      cwd: tmpDir,
+    });
+
+    const wrapperPath = spawnCalls[0].args[0];
+    const wrapperContent = await fs.readFile(wrapperPath, "utf-8");
+
+    expect(wrapperContent).toContain("'--model'");
+    expect(wrapperContent).toContain("'claude-sonnet-4-6'");
+    expect(session.model).toBe("claude-sonnet-4-6");
   });
 });
 
