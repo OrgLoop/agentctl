@@ -28,6 +28,7 @@ import type {
 import type { DaemonStatus } from "./daemon/server.js";
 import type { FuseTimer, Lock, SessionRecord } from "./daemon/state.js";
 import { buildFileContext, prependToPrompt } from "./file-context.js";
+import { fetchIssue, formatIssuePrompt, inferRepo } from "./github-issue.js";
 import { runHook } from "./hooks.js";
 import {
   type AdapterSlot,
@@ -583,6 +584,15 @@ program
     [] as string[],
   )
   .option("--matrix <file>", "YAML matrix file for advanced sweep launch")
+  .option(
+    "--issue <number>",
+    "GitHub issue number to fetch and prepend to prompt",
+    Number,
+  )
+  .option(
+    "--repo <owner/repo>",
+    "GitHub repo (default: inferred from CWD git remote)",
+  )
   .option("--on-create <script>", "Hook: run after session is created")
   .option("--on-complete <script>", "Hook: run after session completes")
   .option("--callback-session <key>", "Callback session key for orchestration")
@@ -662,6 +672,22 @@ program
           maxFileSize: opts.maxFileSize,
         });
         opts.prompt = prependToPrompt(fileContext, opts.prompt);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+    }
+
+    // --- GitHub issue injection (--issue) ---
+    if (opts.issue) {
+      try {
+        const repo = opts.repo ?? (await inferRepo(cwd));
+        const issue = await fetchIssue(opts.issue as number, repo);
+        opts.prompt = formatIssuePrompt(
+          issue,
+          opts.issue as number,
+          opts.prompt,
+        );
       } catch (err) {
         console.error((err as Error).message);
         process.exit(1);

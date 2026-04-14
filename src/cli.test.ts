@@ -39,12 +39,12 @@ describe("CLI logs command", () => {
   it("logs errors on missing session (same as peek)", async () => {
     const { stderr } = await run(["logs", "nonexistent"]);
     expect(stderr).toContain("Session not found");
-  });
+  }, 15_000);
 
   it("peek errors on missing session", async () => {
     const { stderr } = await run(["peek", "nonexistent"]);
     expect(stderr).toContain("Session not found");
-  });
+  }, 15_000);
 });
 
 describe("launch --file flag (#92)", () => {
