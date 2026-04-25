@@ -2,7 +2,7 @@
  * Slate adapter integration test — runs against the real Slate CLI.
  *
  * Prerequisites:
- * - `slate` binary installed (npm: @randomlabs/slate)
+ * - `slate` binary installed and runnable (npm: @randomlabs/slate)
  * - ANTHROPIC_API_KEY set (Slate uses Anthropic models)
  *
  * Skipped automatically if either prerequisite is missing.
@@ -26,9 +26,12 @@ const execFileAsync = promisify(execFile);
 
 // --- Skip checks ---
 
-function isSlateInstalled(): boolean {
+function isSlateUsable(): boolean {
   try {
-    execFileSync("which", [SLATE_BINARY], { encoding: "utf-8" });
+    // `which slate` can return a mise shim even when no Slate version is
+    // configured. Probe `slate --version` instead so we only run integration
+    // tests when the CLI is actually executable.
+    execFileSync(SLATE_BINARY, ["--version"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -82,7 +85,7 @@ describe("Slate integration", () => {
       expect(args[qIdx + 1]).toBe("hello world");
     });
 
-    it.skipIf(!isSlateInstalled())(
+    it.skipIf(!isSlateUsable())(
       "slate --help confirms -q flag exists",
       async () => {
         const { stdout } = await execFileAsync(SLATE_BINARY, ["--help"]);
@@ -92,7 +95,7 @@ describe("Slate integration", () => {
       },
     );
 
-    it.skipIf(!isSlateInstalled())(
+    it.skipIf(!isSlateUsable())(
       "slate --help confirms --dangerously-set-permissions does NOT appear (v1.0.15)",
       async () => {
         // Note: --dangerously-set-permissions is documented but may not appear
@@ -105,7 +108,7 @@ describe("Slate integration", () => {
       },
     );
 
-    it.skipIf(!isSlateInstalled())(
+    it.skipIf(!isSlateUsable())(
       "slate --version returns version string",
       async () => {
         const { stdout } = await execFileAsync(SLATE_BINARY, ["--version"]);
@@ -115,7 +118,7 @@ describe("Slate integration", () => {
   });
 
   describe("non-interactive invocation", () => {
-    it.skipIf(!isSlateInstalled() || !hasApiKey())(
+    it.skipIf(!isSlateUsable() || !hasApiKey())(
       "slate -q exits cleanly with stream-json output (documents empty output bug)",
       async () => {
         // KNOWN BUG: This test documents that Slate v1.0.15's -q mode
@@ -134,7 +137,7 @@ describe("Slate integration", () => {
       },
     );
 
-    it.skipIf(!isSlateInstalled() || !hasApiKey())(
+    it.skipIf(!isSlateUsable() || !hasApiKey())(
       "slate -q with text output also produces empty output",
       async () => {
         const { stdout } = await execFileAsync(
@@ -148,7 +151,7 @@ describe("Slate integration", () => {
       },
     );
 
-    it.skipIf(!isSlateInstalled())(
+    it.skipIf(!isSlateUsable() || !hasApiKey())(
       "slate -q with --dangerously-set-permissions does not error",
       async () => {
         // Verify the flag is accepted (no "unknown option" error)
@@ -171,7 +174,7 @@ describe("Slate integration", () => {
   });
 
   describe("session tracking without stream output", () => {
-    it.skipIf(!isSlateInstalled())(
+    it.skipIf(!isSlateUsable())(
       "adapter can launch and track session via PID even without stream output",
       async () => {
         // This test verifies the adapter's session tracking works even when
