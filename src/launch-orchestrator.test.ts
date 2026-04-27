@@ -290,9 +290,26 @@ function fakeAdapter(): AgentAdapter & { launched: Array<{ cwd: string }> } {
 
 describe("orchestrateLaunch — single-entry matrix (#39)", () => {
   let repoDir: string;
+  let savedEnv: Record<string, string | undefined>;
 
   beforeEach(async () => {
+    // Sanitize git env vars so ALL git subprocesses (including those spawned
+    // by source-code functions like createWorktree) are isolated from any
+    // parent repo. Without this, running tests via pre-push hook leaks
+    // GIT_DIR and causes git commands to operate on the parent agentctl repo
+    // instead of the temp test repo — corrupting core.bare, user.email, etc.
+    savedEnv = {
+      GIT_DIR: process.env.GIT_DIR,
+      GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+      GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES,
+    };
+    delete process.env.GIT_DIR;
+    delete process.env.GIT_WORK_TREE;
+
     repoDir = await createTempRepo();
+
+    // Prevent git from discovering repos above the temp directory
+    process.env.GIT_CEILING_DIRECTORIES = path.dirname(repoDir);
   });
 
   afterEach(async () => {
@@ -310,6 +327,15 @@ describe("orchestrateLaunch — single-entry matrix (#39)", () => {
       }
     }
     await fs.rm(repoDir, { recursive: true, force: true });
+
+    // Restore original env
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   });
 
   it("creates a worktree for a single slot with branch field", async () => {
