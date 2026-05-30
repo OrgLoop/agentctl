@@ -36,12 +36,17 @@ const { OpenCodeAdapter, generateWrapperScript, isModelCompatible } =
 let tmpDir: string;
 let sessionsMetaDir: string;
 let adapter: InstanceType<typeof OpenCodeAdapter>;
+let origHome: string | undefined;
 
 beforeEach(async () => {
   spawnCalls.length = 0;
   tmpDir = await fs.mkdtemp(
     path.join(os.tmpdir(), "agentctl-opencode-launch-"),
   );
+  // Isolate from real ~/.config/opencode/config.json so model resolution
+  // doesn't pick up the user's config when tests expect no model.
+  origHome = process.env.HOME;
+  process.env.HOME = tmpDir;
   const storageDir = path.join(tmpDir, "storage");
   sessionsMetaDir = path.join(tmpDir, "opencode-sessions");
   await fs.mkdir(path.join(storageDir, "session"), { recursive: true });
@@ -58,6 +63,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (origHome !== undefined) process.env.HOME = origHome;
+  else delete process.env.HOME;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 

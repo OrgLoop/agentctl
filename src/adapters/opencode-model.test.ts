@@ -14,12 +14,19 @@ const {
 } = await import("./opencode.js");
 
 let tmpDir: string;
+let origHome: string | undefined;
 
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "agentctl-opencode-model-"));
+  // Isolate from real ~/.config/opencode/config.json so readWorkspaceModel
+  // doesn't pick up the user's model when tests expect undefined.
+  origHome = process.env.HOME;
+  process.env.HOME = tmpDir;
 });
 
 afterEach(async () => {
+  if (origHome !== undefined) process.env.HOME = origHome;
+  else delete process.env.HOME;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
