@@ -1,11 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ClaudeCodeAdapter,
   type LaunchedSessionMeta,
   type PidInfo,
+  stripAnthropicAuthEnv,
 } from "./claude-code.js";
 
 let tmpDir: string;
@@ -1420,5 +1421,54 @@ describe("ClaudeCodeAdapter", () => {
       const output = await adapter.peek("short-session-1");
       expect(output).toBe("Done quickly!");
     });
+  });
+});
+
+describe("stripAnthropicAuthEnv", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("strips ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_BASE_URL by default", () => {
+    vi.stubEnv("AGENTCTL_CLAUDE_USE_API_KEY", "");
+    const env = stripAnthropicAuthEnv({
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      ANTHROPIC_AUTH_TOKEN: "token-test",
+      ANTHROPIC_BASE_URL: "https://example.com",
+      PATH: "/usr/bin",
+      HOME: "/Users/test",
+    });
+
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    // Unrelated vars are untouched
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/Users/test");
+  });
+
+  it("preserves auth vars when AGENTCTL_CLAUDE_USE_API_KEY=1 kill-switch is set", () => {
+    vi.stubEnv("AGENTCTL_CLAUDE_USE_API_KEY", "1");
+    const env = stripAnthropicAuthEnv({
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      ANTHROPIC_AUTH_TOKEN: "token-test",
+      ANTHROPIC_BASE_URL: "https://example.com",
+    });
+
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-test");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("token-test");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://example.com");
+  });
+
+  it("strips auth vars when the kill-switch is set to a non-'1' value", () => {
+    vi.stubEnv("AGENTCTL_CLAUDE_USE_API_KEY", "true");
+    const env = stripAnthropicAuthEnv({ ANTHROPIC_API_KEY: "sk-ant-test" });
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it("is a no-op on envs without the auth vars", () => {
+    vi.stubEnv("AGENTCTL_CLAUDE_USE_API_KEY", "");
+    const env = stripAnthropicAuthEnv({ PATH: "/usr/bin" });
+    expect(env).toEqual({ PATH: "/usr/bin" });
   });
 });

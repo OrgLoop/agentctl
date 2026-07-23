@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+feat: Claude Code launches use the logged-in claude.ai subscription (OAuth) instead of API-key billing — `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` are stripped from the spawn env at both `claude` spawn sites. Set `AGENTCTL_CLAUDE_USE_API_KEY=1` to restore the old API-key behavior (manual kill-switch; no automatic quota fallback).
+
 ## [1.9.1] - 2026-03-25
 
 feat: support base_branch in matrix YAML and --base-branch CLI flag to branch worktrees off non-main branches (#162)

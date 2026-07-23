@@ -334,6 +334,8 @@ The daemon provides session tracking, directory locks, fuse timers, webhooks, an
 
 Set `AGENTCTL_NO_DAEMON=1` to skip the daemon entirely and use direct adapter mode.
 
+**Claude Code billing:** launches strip `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` from the spawned `claude` env, so sessions use the logged-in claude.ai subscription (OAuth) rather than per-token API billing. Set `AGENTCTL_CLAUDE_USE_API_KEY=1` in the daemon env to keep those vars and revert to API-key billing. This is a manual kill-switch only — there is no automatic fallback when subscription quota runs out.
+
 ```bash
 agentctl daemon start [options]
   --foreground         Run in foreground (don't daemonize)

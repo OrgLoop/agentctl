@@ -43,6 +43,29 @@ const STOPPED_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTH_ERROR_RE =
   /not logged in|authentication required|unauthorized|login required/i;
 
+/**
+ * Env vars that switch Claude Code to per-token API billing when present.
+ * Stripped from the spawn env so launches use the logged-in claude.ai
+ * subscription OAuth instead. Kill-switch: set AGENTCTL_CLAUDE_USE_API_KEY=1
+ * to leave these in place (old API-key billing behavior). This is a manual
+ * revert switch only — there is intentionally no quota detection or fallback.
+ */
+const ANTHROPIC_AUTH_ENV_VARS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+] as const;
+
+export function stripAnthropicAuthEnv(
+  env: Record<string, string>,
+): Record<string, string> {
+  if (process.env.AGENTCTL_CLAUDE_USE_API_KEY === "1") return env;
+  for (const key of ANTHROPIC_AUTH_ENV_VARS) {
+    delete env[key];
+  }
+  return env;
+}
+
 export interface PidInfo {
   pid: number;
   cwd: string;
@@ -487,7 +510,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       args.push("-p", opts.prompt);
     }
 
-    const env = buildSpawnEnv(opts.env);
+    const env = stripAnthropicAuthEnv(buildSpawnEnv(opts.env));
     const cwd = opts.cwd || process.cwd();
 
     // Write stdout to a log file so we can extract the session ID
@@ -716,6 +739,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const claudePath = await resolveBinaryPath("claude");
     const child = spawn(claudePath, args, {
       cwd,
+      env: stripAnthropicAuthEnv(buildSpawnEnv()),
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });
